@@ -26,6 +26,12 @@
 - kind: ニュースまたは解説。一般的な説明を最新ニュースとして扱いません。
 - sources: 1〜8件のtitleとHTTPS URL
 
+図解付きの記事はreadingも持ちます。hook（120字以下）、takeaways（3件・各90字以下）、sections（小見出し2〜6件と本文段落の0始まりstart）、diagram、action（200字以下）を指定します。本文はbodyを正とし、見出しは本文を複製せずに挿入します。
+
+diagramはflowまたはcompare、title（60字以下）、items（2〜4件のicon・label・text）、caption（180字以下）です。labelは16字以下、textは60字以下。アイコンはchat、check、arrow、shoe、shirt、book、headphones、run、clock、home、bolt、train、battery、documentから選びます。詳しい検証条件はscripts/build.mjsを参照してください。
+
+図解は固定のSVG部品と記事内の短いラベルから生成します。外部の画像生成APIは使いません。RSSの最新30件には、同じ記事のイラストを640×360のPNGに変換したサムネイルを付けます。過去のreadingがない記事も引き続き表示できます。
+
 Push時にHTML本文・一覧・feed.xmlを生成します。過去記事は日付ファイルが残る間保持し、RSSは新しい30件です。AIのAPIキーや本文生成処理はこの公開リポジトリにはありません。
 
 関心メモは予約タスク側で保持し、「更新して」と明示されたときだけ変更します。会話の個人情報や非公開の業務情報を記事に転載しません。
@@ -37,12 +43,14 @@ GitHub Pagesもリポジトリのファイル・履歴も公開です。検索�
 ## ローカル検証
 
 ```sh
+npm ci --ignore-scripts --no-audit --no-fund
 node scripts/build.test.mjs
 node scripts/build.mjs
+node scripts/rasterize.mjs
 python3 scripts/check_feed.py dist
 ```
 
-実サイトとして動かす場合は SITE_BASE_URL に検証済みのHTTPSサイトURLを指定します。GitHub ActionsではPagesの出力から設定します。新しい依存パッケージのインストールは不要です。
+実サイトとして動かす場合は SITE_BASE_URL に検証済みのHTTPSサイトURLを指定します。GitHub ActionsではPagesの出力から設定します。PNG変換にはバージョンを固定したオープンソースのresvgを使用します。ブラウザや外部画像サービスは不要です。
 
 ## 料金の確認先
 

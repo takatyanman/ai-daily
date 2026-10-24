@@ -1,0 +1,12 @@
+{
+  "name": "daily-ai-news-reader",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node scripts/build.test.mjs",
+    "build": "node scripts/build.mjs && node scripts/rasterize.mjs && python3 scripts/check_feed.py dist"
+  },
+  "dependencies": {
+    "@resvg/resvg-js": "2.6.2"
+  }
+}
