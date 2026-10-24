@@ -1,0 +1,3 @@
+dist/
+*.private.json
+*.private.md
