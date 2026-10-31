@@ -1,7 +1,7 @@
-import {readFile,writeFile,readdir,mkdir,rm,copyFile} from 'node:fs/promises';
+import {readFile,writeFile,readdir,mkdir,rm,copyFile,lstat,realpath} from 'node:fs/promises';
 import {resolve,dirname,join} from 'node:path';
 import {fileURLToPath,pathToFileURL} from 'node:url';
-import {renderIndex,renderArticle} from '../web/render.mjs';
+import {renderIndex,renderArticle,figureImageUrl,localFigureFilename,renderSourceFigures} from '../web/render.mjs';
 import {renderIllustrationSvg,renderArticleThumbnailSvg,articleIllustrationPath} from '../web/illustrations.mjs';
 const root=resolve(dirname(fileURLToPath(import.meta.url)),'..');
 export const xml=s=>String(s).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'",'&apos;');
@@ -24,6 +24,23 @@ export function validateReading(a){
  if(!d||!['flow','compare'].includes(d.type)||!Array.isArray(d.items)||d.items.length<2||d.items.length>4)throw Error('Reading diagram requires two to four items');
  text(d.title,60,'diagram title');text(d.caption,180,'diagram caption');
  for(const item of d.items){if(!icons.has(item.icon))throw Error('Unknown illustration icon');text(item.label,16,'diagram label');text(item.text,60,'diagram item text');}
+ if(r.figures!==undefined){
+  if(!Array.isArray(r.figures)||r.figures.length>2)throw Error('Zero to two quoted figures required');
+  const sources=new Set((a.sources||[]).map(s=>publicUrl(s.url)));
+  for(const f of r.figures){
+   if(!f||typeof f!=='object'||Array.isArray(f)||!Number.isInteger(f.after)||f.after<0||f.after>=count)throw Error('Figure position must be an existing body paragraph');
+   text(f.url,4096,'figure URL');text(f.sourceUrl,4096,'figure source URL');
+   if(!figureImageUrl(f.url))throw Error('Quoted figure image URL must use an approved HTTPS origin');
+   if(new URL(publicUrl(f.sourceUrl)).port||!sources.has(publicUrl(f.sourceUrl)))throw Error('Quoted figure source must match an article reference');
+   text(f.alt,200,'figure alt');text(f.caption,240,'figure caption');text(f.sourceTitle,200,'figure source title');
+   text(f.credit,200,'figure credit');text(f.commentary,360,'figure commentary');
+   if(f.usage!==undefined&&!['quote','licensed','original'].includes(f.usage))throw Error('Unknown figure usage');
+   if(f.licenseTitle!==undefined||f.licenseUrl!==undefined||f.usage==='licensed'){
+    text(f.licenseTitle,120,'figure license title');text(f.licenseUrl,4096,'figure license URL');
+    if(new URL(publicUrl(f.licenseUrl)).port)throw Error('Figure license URL must use HTTPS without an alternate port');
+   }
+  }
+ }
 }
 export function validateDay(day){
  if(!/^\d{4}-\d{2}-\d{2}$/.test(day.date)||!Array.isArray(day.articles)||day.articles.length!==3)throw Error('Each day must contain exactly three articles');
@@ -50,7 +67,7 @@ export function renderFeedBody(a,base){
   const thumbnail=new URL(`illustrations/${a.id}-thumb.png`,base).href;
   full+=`<p><img src="${xml(thumbnail)}" alt="${xml(a.title)}のイラスト" width="640" height="360"></p><p><strong>${xml(r.hook)}</strong></p><h2>この記事のポイント</h2><ul>${r.takeaways.map(s=>`<li>${xml(s)}</li>`).join('')}</ul>`;
  }
- full+=p.map((value,i)=>`${headings.has(i)?`<h2>${xml(headings.get(i))}</h2>`:''}<p>${xml(value).replaceAll('\n','<br>')}</p>`).join('');
+ full+=p.map((value,i)=>`${headings.has(i)?`<h2>${xml(headings.get(i))}</h2>`:''}<p>${xml(value).replaceAll('\n','<br>')}</p>${renderSourceFigures(a,i)}`).join('');
  if(r)full+=`<h2>ひとつ試すなら</h2><p>${xml(r.action)}</p>`;
  full+=`<h2>参照元</h2><ul>${a.sources.map(s=>`<li><a href="${xml(publicUrl(s.url))}">${xml(s.title)}</a></li>`).join('')}</ul>`;
  return full;
@@ -64,7 +81,30 @@ export function renderFeed({title,baseUrl,articles}){
   const thumbnail=a.reading?`<media:thumbnail url="${xml(new URL(`illustrations/${a.id}-thumb.png`,base).href)}" width="640" height="360"/>`:'';
   return `<item><title>${xml(a.title)}</title><link>${xml(url)}</link><guid isPermaLink="true">${xml(url)}</guid><pubDate>${new Date(a.publishedAt).toUTCString()}</pubDate><category>AI作成記事</category><category>${xml(a.category)}</category><description>${xml(a.summary)}</description>${thumbnail}<content:encoded><![CDATA[${encoded}]]></content:encoded></item>`;
  }).join('\n');
- return `<?xml version="1.0" encoding="UTF-8"?>\n<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:media="http://search.yahoo.com/mrss/" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>${xml(title)}</title><link>${xml(base)}</link><description>関心メモに沿った毎朝3本のAI作成記事。出典を付け、事実と解説を区別します。</description><language>ja</language><atom:link href="${xml(new URL('feed.xml',base).href)}" rel="self" type="application/rss+xml"/>${articles[0]?`<lastBuildDate>${new Date(articles[0].publishedAt).toUTCString()}</lastBuildDate>`:''}\n${items}\n</channel></rss>\n`;
+ return `<?xml version="1.0" encoding="UTF-8"?>\n<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:media="http://search.yahoo.com/mrss/" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>${xml(title)}</title><link>${xml(base)}</link><description>JR東日本の動きと仕組みを毎朝3本。何が変わったか、なぜ重要かを出典付きで短く整理します。</description><language>ja</language><atom:link href="${xml(new URL('feed.xml',base).href)}" rel="self" type="application/rss+xml"/>${articles[0]?`<lastBuildDate>${new Date(articles[0].publishedAt).toUTCString()}</lastBuildDate>`:''}\n${items}\n</channel></rss>\n`;
+}
+
+function validRasterAsset(name,data){
+ if(!data.length||data.length>8*1024*1024)return false;
+ if(/\.png$/.test(name))return data.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10]));
+ if(/\.jpe?g$/.test(name))return data[0]===255&&data[1]===216&&data[2]===255;
+ if(/\.webp$/.test(name))return data.subarray(0,4).toString()==='RIFF'&&data.subarray(8,12).toString()==='WEBP';
+ return false;
+}
+
+async function copyFigureAssets(articles,projectRoot,output){
+ const names=new Set(articles.flatMap(a=>(a.reading?.figures||[]).map(f=>localFigureFilename(f.url)).filter(Boolean)));
+ if(!names.size)return;
+ const sourceRoot=await realpath(join(projectRoot,'web','figures'));
+ if(sourceRoot!==join(await realpath(projectRoot),'web','figures'))throw Error('Quoted image directory must stay inside the project');
+ await mkdir(join(output,'figures'),{recursive:true});
+ for(const name of names){
+  const source=join(sourceRoot,name),info=await lstat(source);
+  if(!info.isFile()||info.isSymbolicLink()||info.size>8*1024*1024)throw Error(`Invalid quoted image file: ${name}`);
+  const data=await readFile(source);
+  if(!validRasterAsset(name,data))throw Error(`Invalid or oversized quoted image asset: ${name}`);
+  await writeFile(join(output,'figures',name),data);
+ }
 }
 export async function buildSite({projectRoot=root,output=join(projectRoot,'dist'),baseUrl}={}){
  const config=JSON.parse(await readFile(join(projectRoot,'site.json'),'utf8'));
@@ -76,6 +116,7 @@ export async function buildSite({projectRoot=root,output=join(projectRoot,'dist'
  articles.sort((a,b)=>new Date(b.publishedAt)-new Date(a.publishedAt)||a.id.localeCompare(b.id));
  await rm(output,{recursive:true,force:true});await mkdir(join(output,'articles'),{recursive:true});await mkdir(join(output,'illustrations'),{recursive:true});
  const context={title:config.title,baseUrl:base,articles};
+ await copyFigureAssets(articles,projectRoot,output);
  await writeFile(join(output,'index.html'),renderIndex(context));await writeFile(join(output,'feed.xml'),renderFeed(context));
  for(const article of articles){
   await writeFile(join(output,'articles',`${article.id}.html`),renderArticle({...context,article}));

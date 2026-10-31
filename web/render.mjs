@@ -46,6 +46,62 @@ function sourceUrl(value) {
   }
 }
 
+/** Only explicitly supported, public image origins may be embedded in a quoted figure. */
+export function figureImageUrl(value) {
+  try {
+    const url = new URL(String(value));
+    if (url.protocol !== 'https:' || url.username || url.password || url.port || url.hash) return null;
+    const host = url.hostname;
+    if (host === 'takatyanman.github.io') {
+      return /^\/ai-daily\/figures\/[A-Za-z0-9][A-Za-z0-9._-]{0,120}\.(?:png|jpe?g|webp)$/.test(url.pathname) && !url.search ? url.href : null;
+    }
+    return host === 'jreast.co.jp' || host.endsWith('.jreast.co.jp') ||
+      host === 'prtimes.jp' || host.endsWith('.prtimes.jp') || host === 'prcdn.freetls.fastly.net' || host === 'upload.wikimedia.org' || host === 'thumb.wikimedia.org' ? url.href : null;
+  } catch {
+    return null;
+  }
+}
+
+export function localFigureFilename(value) {
+  const safe = figureImageUrl(value);
+  if (!safe) return null;
+  const url = new URL(safe);
+  return url.hostname === 'takatyanman.github.io' ? url.pathname.slice('/ai-daily/figures/'.length) : null;
+}
+
+function secureSourceUrl(value) {
+  try {
+    const url = new URL(String(value));
+    return url.protocol === 'https:' && !url.username && !url.password && !url.port ? url.href : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The explanatory text is deliberately adjacent to, and separate from, the quoted material. */
+export function renderSourceFigures(article, after) {
+  const figures = Array.isArray(article?.reading?.figures) ? article.reading.figures.slice(0, 2) : [];
+  const sources = new Set((Array.isArray(article.sources) ? article.sources : []).map(source => secureSourceUrl(source.url)).filter(Boolean));
+  return figures.filter(figure => figure?.after === after).slice(0, 2).map(figure => {
+    const image = figureImageUrl(figure.url), source = secureSourceUrl(figure.sourceUrl);
+    const usage = figure.usage ?? 'quote', license = secureSourceUrl(figure.licenseUrl);
+    if (!image || !source || !sources.has(source) || !['quote', 'licensed', 'original'].includes(usage)) return '';
+    if (usage === 'licensed' && (!license || typeof figure.licenseTitle !== 'string' || !figure.licenseTitle.trim())) return '';
+    const label = usage === 'licensed' ? '写真（利用条件に基づき掲載）' : usage === 'original' ? '公開データから作図' : '資料から引用';
+    return `<figure class="source-figure">
+          <span class="figure-label">${label}</span>
+          <a class="source-image-link" href="${escapeAttribute(image)}" target="_blank" rel="noopener noreferrer"><img src="${escapeAttribute(image)}" alt="${escapeAttribute(figure.alt)}" style="max-width:100%;height:auto" loading="lazy" decoding="async" referrerpolicy="no-referrer"></a>
+          <figcaption><strong>${escapeHtml(figure.caption)}</strong><span class="source-figure-credit">${escapeHtml(figure.credit)}</span><a href="${escapeAttribute(source)}" target="_blank" rel="noopener noreferrer">出典：${escapeHtml(figure.sourceTitle)}<span aria-hidden="true"> ↗</span></a>${license ? `<a class="figure-license" href="${escapeAttribute(license)}" target="_blank" rel="noopener noreferrer">利用条件：${escapeHtml(figure.licenseTitle)}<span aria-hidden="true"> ↗</span></a>` : ''}</figcaption>
+          <p class="figure-commentary"><strong>ここに注目：</strong>${escapeHtml(figure.commentary)}</p>
+        </figure>`;
+  }).join('\n');
+}
+
+function hasSourceFigures(article, count) {
+  return (Array.isArray(article?.reading?.figures) ? article.reading.figures.slice(0, 2) : []).some(figure =>
+    Number.isInteger(figure?.after) && figure.after >= 0 && figure.after < count && renderSourceFigures(article, figure.after));
+}
+
 function metadata(article, { showTime = false } = {}) {
   const kind = article.kind || 'ニュース';
   return `<div class="article-meta">
@@ -90,7 +146,7 @@ function takeaways(article) {
 function articleBody(article, paragraphs) {
   const sections = Array.isArray(article?.reading?.sections) ? article.reading.sections : [];
   const starts = new Map(sections.filter(section => Number.isInteger(section.start) && section.start >= 0 && section.start < paragraphs.length).map(section => [section.start, section.heading]));
-  return paragraphs.map((paragraph, index) => `${starts.has(index) ? `        <h2 class="story-heading" id="section-${index}">${escapeHtml(starts.get(index))}</h2>\n` : ''}        <p>${escapeHtml(paragraph)}</p>`).join('\n');
+  return paragraphs.map((paragraph, index) => `${starts.has(index) ? `        <h2 class="story-heading" id="section-${index}">${escapeHtml(starts.get(index))}</h2>\n` : ''}        <p>${escapeHtml(paragraph)}</p>${renderSourceFigures(article, index)}`).join('\n');
 }
 
 function document({ title, description, baseUrl, content, pageClass = '' }) {
@@ -135,8 +191,8 @@ export function renderIndex({ title = 'あなたの朝の3本', baseUrl, article
   const latestDate = entries.length ? publishedDate(entries[0].publishedAt) : '';
   const content = `    <section class="intro" aria-labelledby="page-title">
       <p class="eyebrow">THE MORNING EDITION</p>
-      <div class="intro-heading"><h1 id="page-title">朝のひと息に、<br>今日の視点を。</h1>${latestDate ? `<p class="edition-date">最新号<br>${latestDate}</p>` : ''}</div>
-      <p class="intro-description">今日ひとつ、試したくなる3本。<br class="mobile-break">図解と具体例で、気になる話を読みやすく。</p>
+      <div class="intro-heading"><h1 id="page-title">JR東日本の動きを、短くつかむ。</h1>${latestDate ? `<p class="edition-date">最新号<br>${latestDate}</p>` : ''}</div>
+      <p class="intro-description">何が変わったか、なぜ重要か。公開情報から、仕事への接点も整理します。</p>
     </section>
     <section class="article-list-section" aria-labelledby="articles-title">
       <div class="section-heading"><h2 id="articles-title">届いた記事</h2><span>${escapeHtml(entries.length)} ARTICLES</span></div>
@@ -170,6 +226,7 @@ ${entries.map((article, index) => `        <li class="article-card">
 export function renderArticle({ title = 'あなたの朝の3本', baseUrl, article }) {
   const sources = Array.isArray(article.sources) ? article.sources : [];
   const paragraphs = String(article.body ?? '').trim().split(/\r?\n\s*\r?\n/).filter(Boolean);
+  const hasPrimaryFigure = hasSourceFigures(article, paragraphs.length);
   const sourceItems = sources.map((source) => {
     const url = sourceUrl(source.url);
     const label = source.title || source.url || '参照元';
@@ -182,8 +239,8 @@ export function renderArticle({ title = 'あなたの朝の3本', baseUrl, artic
         <h1>${escapeHtml(article.title)}</h1>
         ${article.reading?.hook || article.summary ? `<p class="article-lead">${escapeHtml(article.reading?.hook || article.summary)}</p>` : ''}
       </header>
-      ${illustration(article, baseUrl)}
       ${takeaways(article)}
+      ${hasPrimaryFigure ? (hasDiagram(article) ? `<p class="diagram-link"><a href="${escapeAttribute(absolute(articleIllustrationPath(article), baseUrl))}" target="_blank" rel="noopener noreferrer">要点の図解を別に見る<span aria-hidden="true"> ↗</span></a></p>` : '') : illustration(article, baseUrl)}
       <div class="article-body">
 ${articleBody(article, paragraphs)}
       </div>
