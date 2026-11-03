@@ -40,6 +40,14 @@ Push時にHTML本文・一覧・feed.xmlを生成します。過去記事は日�
 
 GitHub Pagesもリポジトリのファイル・履歴も公開です。検索除外のrobots.txt/metaは付けますが、非公開サイトや認証によるアクセス制限ではありません。公開用ファイルへ関心メモ・タスク指示・秘密情報を入れないでください。
 
+## 記事の音声再生
+
+最新14日分は、各日の3記事を1本のMP3にまとめて配信します。記事ページの「音声で聴く」から開いている記事の位置で再生し、その日の残りの記事へ自動で進みます。再生速度は0.8〜3倍、記事移動と再生位置の変更に対応します。HTMLの音声再生とMedia Sessionを使い、画面ロック中も再生を続けられる構成です。端末・ブラウザ・省電力設定・通信状況による停止は実機で確認してください。ページを閉じると再生は終了します。
+
+音声は公開記事だけからOpen JTalkで生成します。外部の音声API、APIキー、有料素材は使いません。音声モデルはNitechの `nitech_jp_atr503_m001`（Nagoya Institute of Technology・Tokyo Institute of Technology、[CC BY 3.0](https://creativecommons.org/licenses/by/3.0/)）です。[音声モデルの出典と利用条件](https://changelogs.ubuntu.com/changelogs/pool/multiverse/h/hts-voice-nitech-jp-atr503-m001/hts-voice-nitech-jp-atr503-m001_1.05-8/copyright)を画面とMP3にも記載します。固有名詞や数字の発音が不自然になる場合があります。
+
+音声はビルド時に生成し、リポジトリへは保存しません。音声出力は64MiB以内に制限し、既存のPages成果物を保存期間1日でアップロードします。日付が対象外、本文と音声が不一致、取得に失敗した場合は、開いている記事だけの端末読み上げへ切り替えられます。この代替モードでは画面ロック時に停止する場合があります。
+
 ## ローカル検証
 
 ```sh
@@ -47,10 +55,14 @@ npm ci --ignore-scripts --no-audit --no-fund
 node scripts/build.test.mjs
 node scripts/build.mjs
 node scripts/rasterize.mjs
+python3 scripts/audio_test.py
+python3 scripts/audio.py dist
 python3 scripts/check_feed.py dist
 ```
 
 実サイトとして動かす場合は SITE_BASE_URL に検証済みのHTTPSサイトURLを指定します。GitHub ActionsではPagesの出力から設定します。PNG変換にはバージョンを固定したオープンソースのresvgを使用します。ブラウザや外部画像サービスは不要です。
+
+音声の生成・実音声テストにはUbuntuの `open-jtalk`、`open-jtalk-mecab-naist-jdic`、`hts-voice-nitech-jp-atr503-m001`、`ffmpeg` が必要です。辞書と音声モデルの場所は `OPEN_JTALK_DIC`、`OPEN_JTALK_VOICE`、実行ファイルは `OPEN_JTALK_BIN` で指定できます。音声生成は静的サイトのビルド後に実行してください。
 
 ## 料金の確認先
 

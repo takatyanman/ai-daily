@@ -1,4 +1,4 @@
-const RATES = new Set([0.8, 1, 1.2, 1.5]);
+const RATES = new Set([0.8, 1, 1.2, 1.5, 2, 2.5, 3]);
 
 /** Short utterances; preserve punctuation and Unicode surrogate pairs. */
 export function splitForSpeech(value, limit = 160) {
@@ -112,6 +112,7 @@ export function initSpeechPlayer(doc = globalThis.document, win = globalThis.win
     if (state.phase === 'paused') message = state.error === 'interrupted' ? '読み上げが中断されました。「再開」で止めた部分の先頭から聴けます。' : '一時停止中。再開すると、止めた部分の先頭から読み上げます。';
     if (state.phase === 'finished') message = '最後まで読み上げました。';
     if (state.phase === 'error') message = errorMessage(state.error);
+    if (player.dataset.speechFallback === 'true') message = `端末読み上げ（代替）：${message}`;
     if (message !== lastStatus) { status.textContent = message; lastStatus = message; }
   }
   const reader = createSpeechReader({ synth: win.speechSynthesis, Utterance: win.SpeechSynthesisUtterance, segments, onChange: update });

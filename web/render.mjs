@@ -1,3 +1,4 @@
+import {createHash} from 'node:crypto';
 import {articleIllustrationPath, renderArticleThumbnailSvg} from './illustrations.mjs';
 
 const escapeHtml = (value) => String(value ?? '')
@@ -143,24 +144,47 @@ function takeaways(article) {
       </aside>`;
 }
 
-function speechPlayer() {
-  return `<section class="speech-player" data-speech-player hidden aria-labelledby="speech-title" aria-describedby="speech-help">
+export function articleAudioHash(article) {
+  return createHash('sha256').update(JSON.stringify([
+    article.id, article.title, article.body,
+    (article.reading?.sections || []).map(section => [section.heading, section.start]),
+    article.reading?.action || '',
+  ])).digest('hex');
+}
+
+function speechPlayer(article, baseUrl) {
+  return `<section class="speech-player" data-speech-player data-audio-manifest="${escapeAttribute(absolute('audio/index.json', baseUrl))}" data-audio-fallback="${escapeAttribute(absolute('speech.js', baseUrl))}" data-article-id="${escapeAttribute(article.id)}" data-audio-content-hash="${articleAudioHash(article)}" hidden aria-labelledby="speech-title" aria-describedby="speech-help">
         <h2 id="speech-title">音声で聴く</h2>
+        <p class="audio-current" data-audio-current data-audio-only hidden></p>
+        <audio data-audio-element preload="metadata" hidden></audio>
         <div class="speech-controls">
-          <button type="button" class="speech-toggle" data-speech-toggle>読み上げる</button>
+          <button type="button" class="speech-toggle" data-speech-toggle disabled>音声を確認中</button>
           <button type="button" data-speech-stop disabled>停止</button>
-          <label class="speech-rate" for="speech-rate">読み上げ速度
+          <label class="speech-rate" for="speech-rate">再生速度
             <select id="speech-rate" data-speech-rate>
               <option value="0.8">0.8倍</option>
               <option value="1" selected>1倍</option>
               <option value="1.2">1.2倍</option>
               <option value="1.5">1.5倍</option>
+              <option value="2">2倍</option>
+              <option value="2.5">2.5倍</option>
+              <option value="3">3倍</option>
             </select>
           </label>
         </div>
+        <div class="speech-controls audio-chapter-controls" data-audio-only hidden>
+          <button type="button" data-audio-previous>前の記事</button>
+          <button type="button" data-audio-restart>記事の先頭</button>
+          <button type="button" data-audio-next>次の記事</button>
+        </div>
         <progress data-speech-progress value="0" max="1" aria-label="読み上げの進み具合"></progress>
-        <p class="speech-status" data-speech-status role="status" aria-live="polite" aria-atomic="true">「読み上げる」を押すと、タイトルと本文を読み上げます。</p>
-        <p id="speech-help" class="speech-help">再開は止めた部分の先頭から。画面ロック中は停止する場合があります。</p>
+        <label class="audio-position" data-audio-only hidden><span data-audio-time>0:00 / 0:00</span><input type="range" data-audio-seek min="0" max="1" value="0" step="0.1" aria-label="音声の再生位置"></label>
+        <p class="speech-status" data-speech-status role="status" aria-live="polite" aria-atomic="true">音声ファイルを確認しています。</p>
+        <p id="speech-help" class="speech-help">開いている記事から、その日の残りの記事を続けて再生します。画面をロックしても聴けますが、端末やブラウザの設定、通信状態によって停止する場合があります。</p>
+        <ol class="audio-chapters" data-audio-chapters data-audio-only hidden aria-label="この日の3本"></ol>
+        <p class="audio-credit" data-audio-credit data-audio-only hidden></p>
+        <p class="speech-help" data-audio-fallback-reason hidden></p>
+        <button type="button" class="audio-fallback" data-audio-use-fallback hidden>端末の読み上げに切り替える</button>
       </section>
       <noscript><p class="speech-noscript">音声読み上げを使うには、JavaScriptを有効にしてください。</p></noscript>`;
 }
@@ -202,7 +226,7 @@ ${content}
     <p>AIが作成した記事です。重要な情報は参照元もご確認ください。</p>
     <div class="footer-links"><a href="${escapeAttribute(homeUrl)}">記事一覧</a><span aria-hidden="true">·</span><a href="${escapeAttribute(feedUrl)}">RSS</a></div>
   </footer>
-  ${pageClass === 'article-page' ? `<script type="module" src="${escapeAttribute(absolute('speech.js', baseUrl))}"></script>` : ''}
+  ${pageClass === 'article-page' ? `<script type="module" src="${escapeAttribute(absolute('audio-player.js', baseUrl))}"></script>` : ''}
 </body>
 </html>
 `;
@@ -262,7 +286,7 @@ export function renderArticle({ title = 'あなたの朝の3本', baseUrl, artic
         <h1 data-speech-chunk>${escapeHtml(article.title)}</h1>
         ${article.reading?.hook || article.summary ? `<p class="article-lead">${escapeHtml(article.reading?.hook || article.summary)}</p>` : ''}
       </header>
-      ${speechPlayer()}
+      ${speechPlayer(article, baseUrl)}
       ${takeaways(article)}
       ${hasPrimaryFigure ? (hasDiagram(article) ? `<p class="diagram-link"><a href="${escapeAttribute(absolute(articleIllustrationPath(article), baseUrl))}" target="_blank" rel="noopener noreferrer">要点の図解を別に見る<span aria-hidden="true"> ↗</span></a></p>` : '') : illustration(article, baseUrl)}
       <div class="article-body">

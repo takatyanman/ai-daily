@@ -69,6 +69,7 @@ a:focus-visible { outline: 3px solid #668b54; outline-offset: 5px; border-radius
 .article-lead { margin: 0; color: #5b6c60; font-size: 15px; line-height: 2.15; overflow-wrap: anywhere; }
 .speech-player { display: grid; gap: 12px; margin: 0 0 24px; padding: 20px; border: 1px solid var(--line); border-radius: 12px; background: var(--paper-light); overflow-wrap: anywhere; }
 .speech-player[hidden] { display: none; }
+.speech-player [hidden] { display: none !important; }
 .speech-player h2 { margin: 0; font-size: 15px; line-height: 1.6; }
 .speech-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; min-width: 0; }
 .speech-controls button, .speech-controls select { min-height: 44px; max-width: 100%; border: 1px solid #a9baa0; border-radius: 8px; background: var(--paper-light); color: var(--ink); font: inherit; font-size: 16px; line-height: 1.4; }
@@ -84,6 +85,20 @@ a:focus-visible { outline: 3px solid #668b54; outline-offset: 5px; border-radius
 .speech-status { min-height: 1.8em; }
 .speech-help, .speech-noscript { color: var(--muted); }
 .speech-noscript { margin-bottom: 20px; }
+.audio-current { margin: 0; color: var(--green); font-size: 13px; font-weight: 650; line-height: 1.8; }
+.audio-chapter-controls { gap: 8px; }
+.audio-chapter-controls button { min-width: 0; padding: 9px 12px; font-size: 13px; }
+.audio-position { display: grid; gap: 7px; min-width: 0; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.audio-position > span { text-align: right; }
+.audio-position input { display: block; width: 100%; min-height: 44px; margin: 0; accent-color: var(--green); cursor: pointer; }
+.audio-position input:focus-visible, .audio-chapters button:focus-visible, .audio-fallback:focus-visible { outline: 3px solid #668b54; outline-offset: 3px; }
+.audio-chapters { display: grid; gap: 7px; margin: 2px 0 0; padding: 13px 0 0; border-top: 1px solid var(--line); list-style: none; }
+.audio-chapters button { width: 100%; min-height: 44px; padding: 9px 11px; border: 1px solid transparent; border-radius: 7px; color: var(--ink); background: transparent; font: inherit; font-size: 12px; line-height: 1.8; text-align: left; overflow-wrap: anywhere; cursor: pointer; }
+.audio-chapters button:hover, .audio-chapters button[aria-current] { border-color: #c7d2be; background: var(--soft-green); }
+.audio-chapters button[aria-current] { font-weight: 650; }
+.audio-credit { margin: 0; padding-top: 8px; color: var(--muted); font-size: 10px; line-height: 1.9; }
+.audio-credit a { white-space: nowrap; }
+.audio-fallback { justify-self: start; min-height: 44px; padding: 9px 12px; border: 1px solid #a9baa0; border-radius: 8px; color: var(--ink); background: var(--paper-light); font: inherit; font-size: 12px; line-height: 1.8; cursor: pointer; }
 .article-body { padding: 22px 0 32px; font-size: 16px; line-height: 2.2; letter-spacing: .025em; overflow-wrap: anywhere; }
 .article-body p { margin: 22px 0; white-space: pre-line; }
 .sources { padding: 28px 30px; background: var(--soft-green); border-radius: 4px; }
