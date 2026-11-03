@@ -6,6 +6,7 @@ import {tmpdir} from 'node:os';
 import {validateDay,renderFeed,buildSite} from './build.mjs';
 import {renderArticle} from '../web/render.mjs';
 import {renderIllustrationSvg,renderArticleThumbnailSvg} from '../web/illustrations.mjs';
+import {createSpeechReader,splitForSpeech} from '../web/speech.mjs';
 const day=JSON.parse(await readFile(new URL('../content/2026-10-25.json',import.meta.url),'utf8'));
 const context={title:'朝の3本',baseUrl:'https://example.test/ai-daily/',articles:day.articles};
 test('the visual edition has three stable, sourced articles',()=>{assert.equal(validateDay(day).length,3);});
@@ -151,14 +152,74 @@ test('a build copies only referenced raster assets and rejects disguised or link
   await writeFile(join(temporary,'content',`${copy.date}.json`),JSON.stringify(copy));
   await writeFile(join(temporary,'site.json'),JSON.stringify({title:'図の検証',baseUrl:context.baseUrl}));
   await writeFile(join(temporary,'web','style.css'),'body{color:#000}');
+  await writeFile(join(temporary,'web','speech.mjs'),'export const fixture = true;');
   const source=join(temporary,'web','figures',name);
   await writeFile(source,image);await writeFile(join(temporary,'web','figures','unreferenced.png'),image);
   await buildSite({projectRoot:temporary});
   assert.deepEqual(await readFile(join(temporary,'dist','figures',name)),image);
+  assert.equal(await readFile(join(temporary,'dist','speech.js'),'utf8'),'export const fixture = true;');
   await assert.rejects(readFile(join(temporary,'dist','figures','unreferenced.png')));
   await writeFile(source,'<html>This is not a PNG.</html>');
   await assert.rejects(buildSite({projectRoot:temporary}),/Invalid or oversized quoted image asset/);
   await rm(source);await symlink(join(temporary,'web','figures','unreferenced.png'),source);
   await assert.rejects(buildSite({projectRoot:temporary}),/Invalid quoted image file/);
  }finally{await rm(temporary,{recursive:true,force:true});}
+});
+
+test('speech chunks preserve Japanese punctuation and Unicode and bound long utterances',()=>{
+ const value='第一文。絵文字🚃を含む第二文！'+ 'あ'.repeat(400);
+ const chunks=splitForSpeech(value);
+ assert.equal(chunks.join(''),value);
+ assert.ok(chunks.every(s=>Array.from(s).length<=160));
+ assert.deepEqual(splitForSpeech(' \n\t '),[]);
+});
+
+function speechFixture(segments=['第一文。','第二文。']){
+ const utterances=[];
+ const voice={name:'日本語',lang:'ja-JP',localService:true};
+ const synth={getVoices:()=>[{name:'English',lang:'en-US',default:true},voice],cancel(){},speak(u){utterances.push(u);u.onstart?.();}};
+ class Utterance{constructor(text){this.text=text;}}
+ const reader=createSpeechReader({synth,Utterance,segments});
+ return {reader,synth,utterances,voice};
+}
+
+test('reading advances in order, chooses Japanese and restarts after completion',()=>{
+ const {reader,utterances,voice}=speechFixture();
+ assert.equal(utterances.length,0,'page loading must never autoplay');
+ reader.play();assert.equal(utterances[0].text,'第一文。');assert.equal(utterances[0].lang,'ja-JP');assert.equal(utterances[0].voice,voice);
+ reader.play();assert.equal(utterances.length,1,'repeat play cannot overlap');
+ utterances[0].onend();assert.equal(utterances[1].text,'第二文。');
+ utterances[1].onend();assert.equal(reader.state().phase,'finished');assert.equal(reader.state().index,2);
+ reader.play();assert.equal(utterances[2].text,'第一文。');
+});
+
+test('pause resumes the current sentence and ignores late cancelled events',()=>{
+ const {reader,utterances}=speechFixture();reader.play();utterances[0].onend();
+ const interrupted=utterances[1];reader.pause();
+ assert.equal(reader.state().phase,'paused');assert.equal(reader.state().index,1);
+ interrupted.onend();interrupted.onerror({error:'canceled'});
+ assert.equal(reader.state().phase,'paused');assert.equal(utterances.length,2);
+ reader.play();assert.equal(utterances[2].text,'第二文。');
+ interrupted.onend();assert.equal(reader.state().index,1);
+ utterances[2].onend();assert.equal(reader.state().phase,'finished');
+});
+
+test('speed changes replay only the current sentence and stop discards stale callbacks',()=>{
+ const {reader,utterances}=speechFixture();reader.play();const old=utterances[0];
+ reader.setRate('1.5');assert.equal(utterances[1].rate,1.5);assert.equal(utterances[1].text,'第一文。');
+ old.onend();assert.equal(reader.state().index,0);
+ reader.pause();reader.setRate('0.8');assert.equal(utterances.length,2);
+ reader.play();assert.equal(utterances[2].rate,0.8);
+ reader.setRate('99');assert.equal(reader.state().rate,0.8);
+ const stopped=utterances[2];reader.stop();stopped.onend();stopped.onerror({error:'network'});
+ assert.equal(reader.state().phase,'idle');assert.equal(reader.state().index,0);assert.equal(utterances.length,3);
+});
+
+test('voice loading, speech errors and external interruption remain retryable',()=>{
+ const {reader,synth,utterances,voice}=speechFixture();
+ synth.getVoices=()=>[{lang:'en-US'}];reader.play();assert.equal(reader.state().error,'language-unavailable');assert.equal(utterances.length,0);
+ synth.getVoices=()=>[voice];reader.play();assert.equal(reader.state().phase,'playing');
+ utterances[0].onerror({error:'network'});assert.equal(reader.state().phase,'error');
+ reader.play();utterances[1].onerror({error:'interrupted'});assert.equal(reader.state().phase,'paused');
+ reader.play();assert.equal(utterances[2].text,'第一文。');
 });

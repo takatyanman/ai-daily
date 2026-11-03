@@ -143,10 +143,32 @@ function takeaways(article) {
       </aside>`;
 }
 
+function speechPlayer() {
+  return `<section class="speech-player" data-speech-player hidden aria-labelledby="speech-title" aria-describedby="speech-help">
+        <h2 id="speech-title">音声で聴く</h2>
+        <div class="speech-controls">
+          <button type="button" class="speech-toggle" data-speech-toggle>読み上げる</button>
+          <button type="button" data-speech-stop disabled>停止</button>
+          <label class="speech-rate" for="speech-rate">読み上げ速度
+            <select id="speech-rate" data-speech-rate>
+              <option value="0.8">0.8倍</option>
+              <option value="1" selected>1倍</option>
+              <option value="1.2">1.2倍</option>
+              <option value="1.5">1.5倍</option>
+            </select>
+          </label>
+        </div>
+        <progress data-speech-progress value="0" max="1" aria-label="読み上げの進み具合"></progress>
+        <p class="speech-status" data-speech-status role="status" aria-live="polite" aria-atomic="true">「読み上げる」を押すと、タイトルと本文を読み上げます。</p>
+        <p id="speech-help" class="speech-help">再開は止めた部分の先頭から。画面ロック中は停止する場合があります。</p>
+      </section>
+      <noscript><p class="speech-noscript">音声読み上げを使うには、JavaScriptを有効にしてください。</p></noscript>`;
+}
+
 function articleBody(article, paragraphs) {
   const sections = Array.isArray(article?.reading?.sections) ? article.reading.sections : [];
   const starts = new Map(sections.filter(section => Number.isInteger(section.start) && section.start >= 0 && section.start < paragraphs.length).map(section => [section.start, section.heading]));
-  return paragraphs.map((paragraph, index) => `${starts.has(index) ? `        <h2 class="story-heading" id="section-${index}">${escapeHtml(starts.get(index))}</h2>\n` : ''}        <p>${escapeHtml(paragraph)}</p>${renderSourceFigures(article, index)}`).join('\n');
+  return paragraphs.map((paragraph, index) => `${starts.has(index) ? `        <h2 class="story-heading" id="section-${index}" data-speech-chunk>${escapeHtml(starts.get(index))}</h2>\n` : ''}        <p data-speech-chunk>${escapeHtml(paragraph)}</p>${renderSourceFigures(article, index)}`).join('\n');
 }
 
 function document({ title, description, baseUrl, content, pageClass = '' }) {
@@ -180,6 +202,7 @@ ${content}
     <p>AIが作成した記事です。重要な情報は参照元もご確認ください。</p>
     <div class="footer-links"><a href="${escapeAttribute(homeUrl)}">記事一覧</a><span aria-hidden="true">·</span><a href="${escapeAttribute(feedUrl)}">RSS</a></div>
   </footer>
+  ${pageClass === 'article-page' ? `<script type="module" src="${escapeAttribute(absolute('speech.js', baseUrl))}"></script>` : ''}
 </body>
 </html>
 `;
@@ -236,15 +259,16 @@ export function renderArticle({ title = 'あなたの朝の3本', baseUrl, artic
     <article class="full-article">
       <header class="article-header">
         ${metadata(article, { showTime: true })}
-        <h1>${escapeHtml(article.title)}</h1>
+        <h1 data-speech-chunk>${escapeHtml(article.title)}</h1>
         ${article.reading?.hook || article.summary ? `<p class="article-lead">${escapeHtml(article.reading?.hook || article.summary)}</p>` : ''}
       </header>
+      ${speechPlayer()}
       ${takeaways(article)}
       ${hasPrimaryFigure ? (hasDiagram(article) ? `<p class="diagram-link"><a href="${escapeAttribute(absolute(articleIllustrationPath(article), baseUrl))}" target="_blank" rel="noopener noreferrer">要点の図解を別に見る<span aria-hidden="true"> ↗</span></a></p>` : '') : illustration(article, baseUrl)}
       <div class="article-body">
 ${articleBody(article, paragraphs)}
       </div>
-      ${article.reading?.action ? `<aside class="try-action"><div class="action-mark" aria-hidden="true">✓</div><div><h2>ひとつ、試してみる</h2><p>${escapeHtml(article.reading.action)}</p></div></aside>` : ''}
+      ${article.reading?.action ? `<aside class="try-action"><div class="action-mark" aria-hidden="true">✓</div><div><h2 data-speech-chunk>ひとつ、試してみる</h2><p data-speech-chunk>${escapeHtml(article.reading.action)}</p></div></aside>` : ''}
       <aside class="sources" aria-labelledby="sources-title">
         <p class="eyebrow">SOURCES</p>
         <h2 id="sources-title">参照元</h2>

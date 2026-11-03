@@ -123,6 +123,7 @@ export async function buildSite({projectRoot=root,output=join(projectRoot,'dist'
   if(article.reading){await writeFile(join(output,articleIllustrationPath(article)),renderIllustrationSvg(article));await writeFile(join(output,'illustrations',`${article.id}-thumb.svg`),renderArticleThumbnailSvg(article));}
  }
  await copyFile(join(projectRoot,'web/style.css'),join(output,'style.css'));
+ await copyFile(join(projectRoot,'web/speech.mjs'),join(output,'speech.js'));
  await writeFile(join(output,'robots.txt'),'User-agent: *\nDisallow: /\n');await writeFile(join(output,'.nojekyll'),'');
  return {articles:articles.length,days:files.length,baseUrl:base,output};
 }
