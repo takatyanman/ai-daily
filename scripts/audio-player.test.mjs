@@ -1,11 +1,32 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {AUDIO_RATES,validateAudioManifest,createAudioReader,audioChapterAt,formatAudioTime} from '../web/audio-player.mjs';
+import {AUDIO_RATES,validateAudioManifest,createAudioReader,audioChapterAt,formatAudioTime,validateAudioArticleViews,matchingAudioCues,audioCueAt} from '../web/audio-player.mjs';
 
 const date='2026-11-03',hash='a'.repeat(64);
 const chapters=[0,1,2].map(i=>({id:`${date}-${i+1}`,title:`記事${i+1}`,start:i*10,end:(i+1)*10,articleHash:'b'.repeat(64)}));
 const context={manifestUrl:'https://takatyanman.github.io/ai-daily/audio/index.json',pageUrl:`https://takatyanman.github.io/ai-daily/articles/${date}-2.html`,articleId:chapters[1].id,articleTitle:chapters[1].title,articleHash:chapters[1].articleHash};
 function manifest(){return{version:1,voice:{name:'HTS voice',credit:'NIT/TIT',licenseTitle:'CC BY 3.0',licenseUrl:'https://creativecommons.org/licenses/by/3.0/',sourceUrl:'https://example.test/copyright'},days:{[date]:{url:`${date}-${hash.slice(0,12)}.mp3`,duration:30,sha256:hash,articles:structuredClone(chapters)}}};}
+
+test('all three article views must match before switching text during playback',()=>{
+ const views=chapters.map(article=>({id:article.id,title:article.title,articleHash:article.articleHash,url:new URL(`${article.id}.html`,context.pageUrl).href}));
+ assert.equal(validateAudioArticleViews(chapters,views,context.pageUrl).size,3);
+ for(const modify of [v=>v.pop(),v=>v[2].articleHash='c'.repeat(64),v=>v[2].title='古い本文',v=>v[2].url='https://other.test/article.html',v=>v[2].url='https://takatyanman.github.io/ai-daily/other.html',v=>v[2]=v[0]]){
+  const bad=structuredClone(views);modify(bad);assert.throws(()=>validateAudioArticleViews(chapters,bad,context.pageUrl));
+ }
+});
+
+test('only measured cues with matching visible text can highlight the current segment',()=>{
+ const cues=[{key:'title',text:'記事1',start:0,end:2},{key:'section-0',text:'何が変わるか',start:2,end:4},{key:'paragraph-0',text:'本文\r\n続き',start:4,end:10}];
+ const article={...chapters[0],cues};const texts={'title':'記事1','section-0':'何が変わるか','paragraph-0':'本文\n続き'};
+ const matched=matchingAudioCues(article,texts);assert.equal(matched.length,3);
+ assert.equal(audioCueAt(matched,4).key,'paragraph-0');assert.equal(audioCueAt(matched,2-0.0000005).key,'section-0');
+ assert.equal(audioCueAt(matched,10),null);assert.equal(audioCueAt(matched,NaN),null);
+ const partly=matchingAudioCues(article,{...texts,'section-0':'別の見出し'});assert.equal(partly.length,2);assert.equal(audioCueAt(partly,3),null);
+ assert.deepEqual(matchingAudioCues(chapters[0],texts),[]);
+ for(const modify of [v=>v[1].start=1.5,v=>v[1].key='title',v=>v[1].key='paragraph-0"]',v=>v[2].end=11,v=>v[2].start=NaN]){
+  const bad=structuredClone(cues);modify(bad);assert.deepEqual(matchingAudioCues({...article,cues:bad},texts),[]);
+ }
+});
 
 test('audio manifest binds the requested article to its text and confines media to this site',()=>{
  const result=validateAudioManifest(manifest(),context);assert.equal(result.currentIndex,1);assert.ok(result.day.url.startsWith('https://takatyanman.github.io/ai-daily/audio/'));

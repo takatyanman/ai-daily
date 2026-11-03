@@ -136,24 +136,30 @@ def load_days(project_root: Path) -> list[dict]:
     return days[-MAX_DAYS:]
 
 
-def speech_text(article: dict) -> str:
-    """Speak title, sectioned body, and action once; omit visual/source material."""
+def speech_segments(article: dict) -> list[dict[str, str]]:
+    """Keep visible text units separate so each cue measures real synthesized PCM."""
     reading = article.get("reading") or {}
     headings = {section["start"]: section["heading"] for section in reading.get("sections", [])}
-    chunks = [article["title"]]
+    segments = [("title", article["title"])]
     for index, paragraph in enumerate(paragraphs(article)):
         if index in headings:
-            chunks.append(headings[index])
-        chunks.append(paragraph)
+            segments.append((f"section-{index}", headings[index]))
+        segments.append((f"paragraph-{index}", paragraph))
     if reading.get("action"):
-        chunks.extend(["ひとつ、試してみる", reading["action"]])
+        segments.extend([("action-heading", "ひとつ、試してみる"), ("action", reading["action"])])
     spoken = []
-    for chunk in chunks:
+    for key, text in segments:
         # The Open JTalk CLI reads one input line, including when stdin is used.
-        chunk = re.sub(r"\s+", " ", URL.sub("", chunk)).strip()
+        chunk = re.sub(r"\s+", " ", URL.sub("", text)).strip()
         if chunk:
-            spoken.append(chunk if chunk[-1] in "。！？!?" else chunk + "。")
-    return " ".join(spoken) + "\n"
+            spoken.append({"key": key, "text": text,
+                           "spoken": chunk if chunk[-1] in "。！？!?" else chunk + "。"})
+    return spoken
+
+
+def speech_text(article: dict) -> str:
+    """Speak title, sectioned body, and action once; omit visual/source material."""
+    return " ".join(segment["spoken"] for segment in speech_segments(article)) + "\n"
 
 
 def speech_chunks(text: str) -> list[str]:
@@ -209,27 +215,43 @@ def toolchain() -> dict[str, str]:
     return paths
 
 
-def synthesize_article(article: dict, output: Path, tools: dict[str, str]) -> None:
+def synthesize_article(article: dict, output: Path, tools: dict[str, str]) -> list[dict]:
     # Preserve the voice's native sample rate/frame period; ffmpeg resamples later.
     # Its CLI reads one line and truncates beyond its input buffer. Merge short
     # utterances into one article PCM, never independently encoded MP3 fragments.
     with tempfile.TemporaryDirectory(prefix="jtalk-article-") as temporary:
         chunk_wav = Path(temporary) / "chunk.wav"
         rate = None
+        cursor = 0
+        cues = []
+        segments = speech_segments(article)
+        if not segments:
+            raise AudioError("Article has no speakable text")
         with wave.open(str(output), "wb") as joined:
             joined.setnchannels(1)
             joined.setsampwidth(2)
-            for chunk in speech_chunks(speech_text(article)):
-                command([tools["open_jtalk"], "-x", tools["dictionary"], "-m", tools["voice"],
-                         "-r", "1.0", "-ow", str(chunk_wav)], input_text=chunk + "\n")
-                sample_rate, pcm = bounded_pcm(chunk_wav, leading_pause=0,
-                                              trailing_pause=CHUNK_PAUSE_SECONDS)
-                if rate is None:
-                    rate = sample_rate
-                    joined.setframerate(rate)
-                elif rate != sample_rate:
-                    raise AudioError("Synthesized utterance sample rates differ")
-                joined.writeframesraw(pcm)
+            for index, segment in enumerate(segments):
+                start = cursor
+                # Never combine separate visual units into a synthesis chunk: a
+                # paragraph boundary must come from PCM, not a text-length ratio.
+                chunks = speech_chunks(segment["spoken"])
+                for chunk_index, chunk in enumerate(chunks):
+                    command([tools["open_jtalk"], "-x", tools["dictionary"], "-m", tools["voice"],
+                             "-r", "1.0", "-ow", str(chunk_wav)], input_text=chunk + "\n")
+                    last = index == len(segments) - 1 and chunk_index == len(chunks) - 1
+                    sample_rate, pcm = bounded_pcm(
+                        chunk_wav, leading_pause=LEADING_PAUSE_SECONDS if cursor == 0 else 0,
+                        trailing_pause=TRAILING_PAUSE_SECONDS if last else CHUNK_PAUSE_SECONDS)
+                    if rate is None:
+                        rate = sample_rate
+                        joined.setframerate(rate)
+                    elif rate != sample_rate:
+                        raise AudioError("Synthesized utterance sample rates differ")
+                    joined.writeframesraw(pcm)
+                    cursor += len(pcm) // 2
+                cues.append({"key": segment["key"], "text": segment["text"],
+                             "startFrame": start, "endFrame": cursor})
+        return cues
 
 
 def bounded_pcm(path: Path, *, leading_pause: float = LEADING_PAUSE_SECONDS,
@@ -261,7 +283,8 @@ def bounded_pcm(path: Path, *, leading_pause: float = LEADING_PAUSE_SECONDS,
     return rate, b"\0\0" * lead + raw[first * 2:last * 2] + b"\0\0" * tail
 
 
-def concatenate_articles(articles: list[dict], wavs: list[Path], output: Path) -> tuple[list[dict], float]:
+def concatenate_articles(articles: list[dict], wavs: list[Path], output: Path,
+                         cue_frames: list[list[dict]] | None = None) -> tuple[list[dict], float]:
     """Chapter starts/ends count WAV frames, including the bounded pauses."""
     chapters = []
     cursor = 0
@@ -269,7 +292,9 @@ def concatenate_articles(articles: list[dict], wavs: list[Path], output: Path) -
     with wave.open(str(output), "wb") as joined:
         joined.setnchannels(1)
         joined.setsampwidth(2)
-        for article, wav in zip(articles, wavs, strict=True):
+        if cue_frames is not None and len(cue_frames) != len(articles):
+            raise AudioError("Measured cues are required for every article")
+        for index, (article, wav) in enumerate(zip(articles, wavs, strict=True)):
             sample_rate, pcm = bounded_pcm(wav)
             if rate is None:
                 rate = sample_rate
@@ -277,9 +302,32 @@ def concatenate_articles(articles: list[dict], wavs: list[Path], output: Path) -
             elif rate != sample_rate:
                 raise AudioError("Synthesized article sample rates differ")
             end = cursor + len(pcm) // 2
-            chapters.append({"id": article["id"], "title": article["title"],
-                             "start": cursor / rate, "end": end / rate,
-                             "articleHash": article_hash(article)})
+            chapter = {"id": article["id"], "title": article["title"],
+                       "start": cursor / rate, "end": end / rate,
+                       "articleHash": article_hash(article)}
+            if cue_frames is not None:
+                measured = cue_frames[index]
+                expected = speech_segments(article)
+                if not isinstance(measured, list) or len(measured) != len(expected) or not measured:
+                    raise AudioError("Measured cues do not match the spoken article")
+                local_cursor = 0
+                cues = []
+                for cue, segment in zip(measured, expected, strict=True):
+                    if (not isinstance(cue, dict) or cue.get("key") != segment["key"] or
+                            cue.get("text") != segment["text"] or
+                            type(cue.get("startFrame")) is not int or
+                            type(cue.get("endFrame")) is not int or
+                            cue["startFrame"] != local_cursor or
+                            not local_cursor < cue["endFrame"] <= len(pcm) // 2):
+                        raise AudioError("Invalid measured cue boundary or text")
+                    cues.append({"key": cue["key"], "text": cue["text"],
+                                 "start": (cursor + local_cursor) / rate,
+                                 "end": (cursor + cue["endFrame"]) / rate})
+                    local_cursor = cue["endFrame"]
+                if local_cursor != len(pcm) // 2:
+                    raise AudioError("Measured cues do not cover the complete article PCM")
+                chapter["cues"] = cues
+            chapters.append(chapter)
             joined.writeframesraw(pcm)
             cursor = end
     return chapters, cursor / rate
@@ -345,12 +393,13 @@ def build_audio(output: Path, project_root: Path = ROOT) -> dict:
         temporary = Path(temporary)
         for day in days:
             wavs = []
+            cue_frames = []
             for article in day["articles"]:
                 wav = temporary / f"{article['id']}.wav"
-                synthesize_article(article, wav, tools)
+                cue_frames.append(synthesize_article(article, wav, tools))
                 wavs.append(wav)
             joined = temporary / "joined.wav"
-            chapters, duration = concatenate_articles(day["articles"], wavs, joined)
+            chapters, duration = concatenate_articles(day["articles"], wavs, joined, cue_frames)
             mp3 = temporary / f"{day['date']}.mp3"
             encode_mp3(joined, mp3, day["date"], tools)
             validate_mp3(mp3, duration, tools)

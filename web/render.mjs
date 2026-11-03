@@ -9,6 +9,8 @@ const escapeHtml = (value) => String(value ?? '')
   .replaceAll("'", '&#39;');
 
 const escapeAttribute = escapeHtml;
+// Change with the audio UI so newly rendered pages bypass older browser assets.
+const AUDIO_UI_REVISION = '20261104-sync';
 
 function absolute(path, baseUrl) {
   return new URL(path, baseUrl).href;
@@ -154,13 +156,13 @@ export function articleAudioHash(article) {
 
 function speechPlayer(article, baseUrl) {
   return `<section class="speech-player" data-speech-player data-audio-manifest="${escapeAttribute(absolute('audio/index.json', baseUrl))}" data-audio-fallback="${escapeAttribute(absolute('speech.js', baseUrl))}" data-article-id="${escapeAttribute(article.id)}" data-audio-content-hash="${articleAudioHash(article)}" hidden aria-labelledby="speech-title" aria-describedby="speech-help">
-        <h2 id="speech-title">音声で聴く</h2>
+        <h2 id="speech-title" class="audio-visually-hidden">音声で聴く</h2>
         <p class="audio-current" data-audio-current data-audio-only hidden></p>
         <audio data-audio-element preload="metadata" hidden></audio>
         <div class="speech-controls">
           <button type="button" class="speech-toggle" data-speech-toggle disabled>音声を確認中</button>
           <button type="button" data-speech-stop disabled>停止</button>
-          <label class="speech-rate" for="speech-rate">再生速度
+          <label class="speech-rate" for="speech-rate"><span class="audio-visually-hidden">再生速度</span>
             <select id="speech-rate" data-speech-rate>
               <option value="0.8">0.8倍</option>
               <option value="1" selected>1倍</option>
@@ -172,17 +174,25 @@ function speechPlayer(article, baseUrl) {
             </select>
           </label>
         </div>
-        <div class="speech-controls audio-chapter-controls" data-audio-only hidden>
-          <button type="button" data-audio-previous>前の記事</button>
-          <button type="button" data-audio-restart>記事の先頭</button>
-          <button type="button" data-audio-next>次の記事</button>
-        </div>
         <progress data-speech-progress value="0" max="1" aria-label="読み上げの進み具合"></progress>
         <label class="audio-position" data-audio-only hidden><span data-audio-time>0:00 / 0:00</span><input type="range" data-audio-seek min="0" max="1" value="0" step="0.1" aria-label="音声の再生位置"></label>
+        <div class="audio-follow-controls" data-audio-only hidden>
+          <label><input type="checkbox" data-audio-follow checked> 本文を自動で追う</label>
+          <button type="button" data-audio-locate>再生位置へ</button>
+        </div>
         <p class="speech-status" data-speech-status role="status" aria-live="polite" aria-atomic="true">音声ファイルを確認しています。</p>
-        <p id="speech-help" class="speech-help">開いている記事から、その日の残りの記事を続けて再生します。画面をロックしても聴けますが、端末やブラウザの設定、通信状態によって停止する場合があります。</p>
-        <ol class="audio-chapters" data-audio-chapters data-audio-only hidden aria-label="この日の3本"></ol>
-        <p class="audio-credit" data-audio-credit data-audio-only hidden></p>
+        <details class="audio-details">
+          <summary>この日の3本・再生の詳細</summary>
+          <div class="speech-controls audio-chapter-controls" data-audio-only hidden>
+            <button type="button" data-audio-previous>前の記事</button>
+            <button type="button" data-audio-restart>記事の先頭</button>
+            <button type="button" data-audio-next>次の記事</button>
+          </div>
+          <ol class="audio-chapters" data-audio-chapters data-audio-only hidden aria-label="この日の3本"></ol>
+          <p class="speech-help" data-audio-sync-status data-audio-only hidden></p>
+          <p id="speech-help" class="speech-help">開いている記事から、その日の残りの記事を続けて再生します。画面をロックしても聴けますが、端末やブラウザの設定、通信状態によって停止する場合があります。</p>
+          <p class="audio-credit" data-audio-credit data-audio-only hidden></p>
+        </details>
         <p class="speech-help" data-audio-fallback-reason hidden></p>
         <button type="button" class="audio-fallback" data-audio-use-fallback hidden>端末の読み上げに切り替える</button>
       </section>
@@ -192,13 +202,13 @@ function speechPlayer(article, baseUrl) {
 function articleBody(article, paragraphs) {
   const sections = Array.isArray(article?.reading?.sections) ? article.reading.sections : [];
   const starts = new Map(sections.filter(section => Number.isInteger(section.start) && section.start >= 0 && section.start < paragraphs.length).map(section => [section.start, section.heading]));
-  return paragraphs.map((paragraph, index) => `${starts.has(index) ? `        <h2 class="story-heading" id="section-${index}" data-speech-chunk>${escapeHtml(starts.get(index))}</h2>\n` : ''}        <p data-speech-chunk>${escapeHtml(paragraph)}</p>${renderSourceFigures(article, index)}`).join('\n');
+  return paragraphs.map((paragraph, index) => `${starts.has(index) ? `        <h2 class="story-heading" id="section-${index}" data-speech-chunk data-audio-cue="section-${index}">${escapeHtml(starts.get(index))}</h2>\n` : ''}        <p data-speech-chunk data-audio-cue="paragraph-${index}">${escapeHtml(paragraph)}</p>${renderSourceFigures(article, index)}`).join('\n');
 }
 
 function document({ title, description, baseUrl, content, pageClass = '' }) {
   const homeUrl = absolute('./', baseUrl);
   const feedUrl = absolute('feed.xml', baseUrl);
-  const stylesheetUrl = absolute('style.css', baseUrl);
+  const stylesheetUrl = absolute(`style.css?v=${AUDIO_UI_REVISION}`, baseUrl);
   return `<!doctype html>
 <html lang="ja">
 <head>
@@ -226,7 +236,7 @@ ${content}
     <p>AIが作成した記事です。重要な情報は参照元もご確認ください。</p>
     <div class="footer-links"><a href="${escapeAttribute(homeUrl)}">記事一覧</a><span aria-hidden="true">·</span><a href="${escapeAttribute(feedUrl)}">RSS</a></div>
   </footer>
-  ${pageClass === 'article-page' ? `<script type="module" src="${escapeAttribute(absolute('audio-player.js', baseUrl))}"></script>` : ''}
+  ${pageClass === 'article-page' ? `<script type="module" src="${escapeAttribute(absolute(`audio-player.js?v=${AUDIO_UI_REVISION}`, baseUrl))}"></script>` : ''}
 </body>
 </html>
 `;
@@ -269,8 +279,15 @@ ${entries.map((article, index) => `        <li class="article-card">
   });
 }
 
-/** Render an article with escaped paragraphs and explicit source links. */
-export function renderArticle({ title = 'あなたの朝の3本', baseUrl, article }) {
+function articleHeader(article) {
+  return `<header class="article-header" data-audio-article-header>
+        ${metadata(article, { showTime: true })}
+        <h1 data-speech-chunk data-audio-cue="title">${escapeHtml(article.title)}</h1>
+        ${article.reading?.hook || article.summary ? `<p class="article-lead">${escapeHtml(article.reading?.hook || article.summary)}</p>` : ''}
+      </header>`;
+}
+
+function articleContent(article, baseUrl) {
   const sources = Array.isArray(article.sources) ? article.sources : [];
   const paragraphs = String(article.body ?? '').trim().split(/\r?\n\s*\r?\n/).filter(Boolean);
   const hasPrimaryFigure = hasSourceFigures(article, paragraphs.length);
@@ -279,20 +296,13 @@ export function renderArticle({ title = 'あなたの朝の3本', baseUrl, artic
     const label = source.title || source.url || '参照元';
     return `          <li>${url ? `<a href="${escapeAttribute(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)}<span aria-hidden="true"> ↗</span></a><span class="source-domain">${escapeHtml(new URL(url).hostname)}</span>` : `<span>${escapeHtml(label)}</span>`}</li>`;
   }).join('\n');
-  const content = `    <nav class="back-nav" aria-label="記事一覧へ"><a href="${escapeAttribute(absolute('./', baseUrl))}"><span aria-hidden="true">←</span> 記事一覧に戻る</a></nav>
-    <article class="full-article">
-      <header class="article-header">
-        ${metadata(article, { showTime: true })}
-        <h1 data-speech-chunk>${escapeHtml(article.title)}</h1>
-        ${article.reading?.hook || article.summary ? `<p class="article-lead">${escapeHtml(article.reading?.hook || article.summary)}</p>` : ''}
-      </header>
-      ${speechPlayer(article, baseUrl)}
+  return `<div data-audio-article-content>
       ${takeaways(article)}
       ${hasPrimaryFigure ? (hasDiagram(article) ? `<p class="diagram-link"><a href="${escapeAttribute(absolute(articleIllustrationPath(article), baseUrl))}" target="_blank" rel="noopener noreferrer">要点の図解を別に見る<span aria-hidden="true"> ↗</span></a></p>` : '') : illustration(article, baseUrl)}
       <div class="article-body">
 ${articleBody(article, paragraphs)}
       </div>
-      ${article.reading?.action ? `<aside class="try-action"><div class="action-mark" aria-hidden="true">✓</div><div><h2 data-speech-chunk>ひとつ、試してみる</h2><p data-speech-chunk>${escapeHtml(article.reading.action)}</p></div></aside>` : ''}
+      ${article.reading?.action ? `<aside class="try-action"><div class="action-mark" aria-hidden="true">✓</div><div><h2 data-speech-chunk data-audio-cue="action-heading">ひとつ、試してみる</h2><p data-speech-chunk data-audio-cue="action">${escapeHtml(article.reading.action)}</p></div></aside>` : ''}
       <aside class="sources" aria-labelledby="sources-title">
         <p class="eyebrow">SOURCES</p>
         <h2 id="sources-title">参照元</h2>
@@ -301,7 +311,26 @@ ${sourceItems}
         </ol>` : '<p>参照元はありません。</p>'}
         <p class="source-note">本文は参照元をもとにAIが作成しています。解説にはAIによる整理・考察を含みます。</p>
       </aside>
+      </div>`;
+}
+
+function articleViewAttributes(article, baseUrl, title) {
+  return `data-article-id="${escapeAttribute(article.id)}" data-audio-content-hash="${articleAudioHash(article)}" data-article-url="${escapeAttribute(articleUrl(article, baseUrl))}" data-document-title="${escapeAttribute(`${article.title} | ${title}`)}" data-description="${escapeAttribute(article.summary || article.title)}"`;
+}
+
+/** Render the opened article once; other daily articles stay inert until selected. */
+export function renderArticle({ title = 'あなたの朝の3本', baseUrl, article, articles = [] }) {
+  const dayPrefix = String(article.id).slice(0, 10);
+  const others = (Array.isArray(articles) ? articles : []).filter(candidate =>
+    candidate.id !== article.id && /^\d{4}-\d{2}-\d{2}-[123]$/.test(candidate.id) && candidate.id.slice(0, 10) === dayPrefix)
+    .sort((left, right) => left.id.localeCompare(right.id));
+  const content = `    <nav class="back-nav" aria-label="記事一覧へ"><a href="${escapeAttribute(absolute('./', baseUrl))}"><span aria-hidden="true">←</span> 記事一覧に戻る</a></nav>
+    <article class="full-article" data-audio-article-root ${articleViewAttributes(article, baseUrl, title)}>
+      ${articleHeader(article)}
+      ${speechPlayer(article, baseUrl)}
+      ${articleContent(article, baseUrl)}
     </article>
+    ${others.map(candidate => `<template data-audio-article-template ${articleViewAttributes(candidate, baseUrl, title)}>${articleHeader(candidate)}${articleContent(candidate, baseUrl)}</template>`).join('\n    ')}
     <nav class="article-bottom-nav" aria-label="記事を読み終えたら"><a href="${escapeAttribute(absolute('./', baseUrl))}"><span aria-hidden="true">←</span> ほかの記事を読む</a><a href="${escapeAttribute(absolute('feed.xml', baseUrl))}">RSSで受け取る <span aria-hidden="true">↗</span></a></nav>`;
   return document({
     title: `${article.title} | ${title}`,

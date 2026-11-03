@@ -61,6 +61,90 @@ export function audioChapterAt(articles, position) {
   return index;
 }
 
+/** Every daily view must match the audio, including articles other than the opened one. */
+export function validateAudioArticleViews(articles, views, pageUrl) {
+  const page = secureUrl(pageUrl);
+  if (!page || !Array.isArray(views) || views.length !== articles.length) invalid('article-views');
+  const byId = new Map();
+  for (const view of views) {
+    if (!view || byId.has(view.id)) invalid('article-views');
+    byId.set(view.id, view);
+  }
+  for (const article of articles) {
+    const view = byId.get(article.id), url = secureUrl(view?.url);
+    if (!view || view.articleHash !== article.articleHash || view.title !== article.title || !url || url.origin !== page.origin || url.href !== new URL(`${article.id}.html`, page).href) invalid('content-mismatch');
+  }
+  return byId;
+}
+
+/** Timings come from synthesized PCM frames; mismatched or absent text is never highlighted. */
+export function matchingAudioCues(article, cueTexts) {
+  if (!Array.isArray(article.cues) || !article.cues.length) return [];
+  const texts = cueTexts instanceof Map ? cueTexts : new Map(Object.entries(cueTexts || {}));
+  const keys = new Set(); let previousEnd = article.start;
+  for (const cue of article.cues) {
+    if (!cue || !/^(?:title|section-\d+|paragraph-\d+|action-heading|action)$/.test(cue.key || '') || keys.has(cue.key) || typeof cue.text !== 'string' || !Number.isFinite(cue.start) || !Number.isFinite(cue.end) || cue.end <= cue.start || Math.abs(cue.start - previousEnd) > 0.001 || cue.end > article.end + 0.001) return [];
+    keys.add(cue.key); previousEnd = cue.end;
+  }
+  if (Math.abs(previousEnd - article.end) > 0.001) return [];
+  const normalized = text => String(text).replace(/\r\n?/g, '\n');
+  return article.cues.filter(cue => texts.has(cue.key) && normalized(texts.get(cue.key)) === normalized(cue.text));
+}
+
+export function audioCueAt(cues, position) {
+  if (!Number.isFinite(position)) return null;
+  // An omitted text match leaves a real gap rather than extending a neighboring cue.
+  return cues.find(cue => position + 0.001 >= cue.start && position + 0.001 < cue.end) || null;
+}
+
+function prepareArticleViews(doc, win, articles) {
+  const root = doc.querySelector('[data-audio-article-root]');
+  const activeHeader = root?.querySelector('[data-audio-article-header]');
+  const activeContent = root?.querySelector('[data-audio-article-content]');
+  if (!root || !activeHeader || !activeContent) invalid('article-views');
+  function viewFrom(node, header, content) {
+    if (!header || !content) invalid('article-views');
+    return {
+      id: node.dataset.articleId, articleHash: node.dataset.audioContentHash,
+      title: header.querySelector('h1[data-speech-chunk]')?.textContent,
+      url: node.dataset.articleUrl, documentTitle: node.dataset.documentTitle,
+      description: node.dataset.description,
+      header: header.cloneNode(true), content: content.cloneNode(true),
+    };
+  }
+  const views = [viewFrom(root, activeHeader, activeContent)];
+  doc.querySelectorAll('template[data-audio-article-template]').forEach(template => {
+    views.push(viewFrom(template, template.content.querySelector('[data-audio-article-header]'), template.content.querySelector('[data-audio-article-content]')));
+  });
+  const byId = validateAudioArticleViews(articles, views, win.location.href);
+  for (const article of articles) {
+    const view = byId.get(article.id), texts = new Map();
+    for (const part of [view.header, view.content]) {
+      part.querySelectorAll('[data-audio-cue]').forEach(node => texts.set(node.dataset.audioCue, node.textContent));
+    }
+    view.cues = matchingAudioCues(article, texts);
+  }
+  let currentId = root.dataset.articleId;
+  return {
+    root, byId,
+    current() { return currentId; },
+    show(id) {
+      if (id === currentId) return;
+      const view = byId.get(id);
+      if (!view) invalid('article-views');
+      root.querySelector('[data-audio-article-header]').replaceWith(view.header.cloneNode(true));
+      root.querySelector('[data-audio-article-content]').replaceWith(view.content.cloneNode(true));
+      root.dataset.articleId = id; root.dataset.audioContentHash = view.articleHash;
+      root.dataset.articleUrl = view.url; root.dataset.documentTitle = view.documentTitle;
+      root.dataset.description = view.description;
+      doc.title = view.documentTitle;
+      doc.querySelector('meta[name="description"]')?.setAttribute('content', view.description || view.title);
+      try { win.history.replaceState(win.history.state, '', view.url); } catch { /* The visible article still changes when History is unavailable. */ }
+      currentId = id;
+    },
+  };
+}
+
 /** One media element and one daily file keep chapter transitions independent of JS timers. */
 export function createAudioReader({audio, articles, duration, startIndex = 0, onChange = () => {}}) {
   let phase = 'idle', rate = 1, error = null, generation = 0, intendedPlaying = false;
@@ -205,8 +289,10 @@ export async function initAudioPlayer(doc = globalThis.document, win = globalThi
   const previous = find('[data-audio-previous]'), next = find('[data-audio-next]'), restart = find('[data-audio-restart]');
   const chapters = find('[data-audio-chapters]'), credit = find('[data-audio-credit]');
   const fallbackButton = find('[data-audio-use-fallback]'), fallbackReason = find('[data-audio-fallback-reason]');
+  const follow = find('[data-audio-follow]'), locate = find('[data-audio-locate]');
+  const syncStatus = find('[data-audio-sync-status]');
   if (!toggle || !stop || !speed || !progress || !status || !audio) return null;
-  let reader = null, fallbackStarted = false;
+  let reader = null, fallbackStarted = false, clearReading = () => {};
   const cleanups = [];
   const listen = (node, name, handler) => {
     node?.addEventListener(name, handler);
@@ -214,14 +300,16 @@ export async function initAudioPlayer(doc = globalThis.document, win = globalThi
   };
   async function fallback(reason) {
     if (fallbackStarted) return;
-    fallbackStarted = true; reader?.dispose(); cleanups.forEach(remove => remove());
+    fallbackStarted = true; reader?.dispose(); cleanups.forEach(remove => remove()); clearReading();
     audio.removeAttribute('src'); audio.load();
     player.querySelectorAll('[data-audio-only]').forEach(node => { node.hidden = true; });
     if (fallbackButton) fallbackButton.hidden = true;
     progress.hidden = false;
     player.dataset.speechFallback = 'true';
     const help = find('#speech-help');
-    if (help) help.textContent = '代替の端末読み上げでは、開いている記事だけを読み上げます。再開は止めた部分の先頭から。画面をロックすると停止する場合があります。';
+    if (help) help.textContent = '代替の端末読み上げでは、いま表示している記事だけを読み上げます。段落の強調表示は使えません。再開は止めた部分の先頭から。画面をロックすると停止する場合があります。';
+    const details = find('.audio-details');
+    if (details) details.open = true;
     if (fallbackReason) { fallbackReason.hidden = false; fallbackReason.textContent = reason; }
     toggle.disabled = false; speed.disabled = false;
     try {
@@ -234,7 +322,7 @@ export async function initAudioPlayer(doc = globalThis.document, win = globalThi
       status.textContent = '音声と代替読み上げを読み込めませんでした。通信状態を確認し、ページを開き直してください。';
     }
   }
-  let edition;
+  let edition, articleViews;
   try {
     const location = manifestLocation(player.dataset.audioManifest, win.location.href);
     const request = new URL(location);
@@ -253,9 +341,10 @@ export async function initAudioPlayer(doc = globalThis.document, win = globalThi
       articleTitle: doc.querySelector('h1[data-speech-chunk]')?.textContent,
       articleHash: player.dataset.audioContentHash,
     });
+    articleViews = prepareArticleViews(doc, win, edition.day.articles);
     if (!audio.canPlayType('audio/mpeg')) throw new Error('audio-unsupported');
   } catch (failure) {
-    const reason = failure.code === 'content-mismatch' ? '本文と音声の版が一致しないため、端末の読み上げを使います。' : failure.code === 'missing-day' ? 'この日の音声ファイルがないため、端末の読み上げを使います。' : '音声ファイルの情報を取得・確認できないため、端末の読み上げを使います。';
+    const reason = ['content-mismatch', 'article-views'].includes(failure.code) ? '同じ日の本文と音声の版を一致させられないため、表示中の記事を端末の読み上げで聴けます。' : failure.code === 'missing-day' ? 'この日の音声ファイルがないため、端末の読み上げを使います。' : '音声ファイルの情報を取得・確認できないため、端末の読み上げを使います。';
     await fallback(reason);
     return null;
   }
@@ -278,10 +367,48 @@ export async function initAudioPlayer(doc = globalThis.document, win = globalThi
       link.target = '_blank'; link.rel = 'noopener noreferrer'; credit.append(link, doc.createTextNode(' '));
     }
   }
+  let followEnabled = true, highlighted = null, lastReadingId = null, lastCueKey = null, lastReadingPhase = null;
+  try { followEnabled = win.localStorage.getItem('ai-daily-audio-follow') !== 'off'; } catch { /* Optional preference. */ }
+  if (follow) follow.checked = followEnabled;
+  clearReading = () => {
+    if (highlighted) { highlighted.classList.remove('audio-reading-active'); highlighted.removeAttribute('aria-current'); }
+    highlighted = null; lastReadingId = null; lastCueKey = null; lastReadingPhase = null;
+  };
+  function scrollToReading(node) {
+    if (!node || doc.visibilityState === 'hidden') return;
+    const rectangle = node.getBoundingClientRect(), toolbar = player.getBoundingClientRect();
+    const height = win.innerHeight || doc.documentElement.clientHeight;
+    const top = toolbar.top <= 24 || rectangle.top >= toolbar.bottom ? Math.min(toolbar.height + 24, height - 80) : 24;
+    const available = Math.max(80, height - top - 24);
+    if (rectangle.top >= top && (rectangle.height > available ? rectangle.top < height - 24 : rectangle.bottom <= height - 24)) return;
+    const offset = rectangle.top - top - Math.max(0, (available - rectangle.height) / 2);
+    const reduced = win.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    try { win.scrollBy({top: offset, behavior: reduced ? 'instant' : 'smooth'}); } catch { node.scrollIntoView?.({block: 'center'}); }
+  }
+  function syncReading(state, forceScroll = false) {
+    const article = day.articles[state.index];
+    if (articleViews.current() !== article.id) clearReading();
+    articleViews.show(article.id);
+    const view = articleViews.byId.get(article.id), cue = audioCueAt(view.cues, state.position);
+    const changed = lastReadingId !== article.id || lastCueKey !== cue?.key || (state.phase === 'playing' && lastReadingPhase !== 'playing');
+    const showHighlight = cue && (forceScroll || !['idle', 'finished', 'error'].includes(state.phase));
+    const node = showHighlight ? articleViews.root.querySelector(`[data-audio-cue="${cue.key}"]`) : null;
+    if (node !== highlighted) {
+      if (highlighted) { highlighted.classList.remove('audio-reading-active'); highlighted.removeAttribute('aria-current'); }
+      highlighted = node;
+      if (node) { node.classList.add('audio-reading-active'); node.setAttribute('aria-current', 'true'); }
+    }
+    if (follow) follow.disabled = !view.cues.length;
+    if (locate) locate.disabled = !cue;
+    if (syncStatus) syncStatus.textContent = !view.cues.length ? 'この音声には本文と一致する段落の時刻情報がないため、記事の切り替えだけを行います。' : view.cues.length < (article.cues?.length || 0) ? '本文と時刻情報が一致する段落だけを強調表示します。' : '実際に合成した音声の時刻に合わせて、読み上げ中の見出しや段落を強調表示します。';
+    if (node && (forceScroll || (followEnabled && changed && state.phase === 'playing'))) scrollToReading(node);
+    lastReadingId = article.id; lastCueKey = cue?.key; lastReadingPhase = state.phase;
+  }
   let lastIndex = -1, lastStatus = '';
   const session = win.navigator?.mediaSession;
   function update(state) {
     const article = day.articles[state.index];
+    syncReading(state);
     toggle.disabled = false;
     toggle.textContent = state.phase === 'playing' || state.phase === 'loading' ? '一時停止' : state.phase === 'paused' ? '再開' : state.phase === 'finished' ? 'もう一度聴く' : state.phase === 'error' ? 'もう一度試す' : '再生';
     stop.disabled = state.phase === 'idle'; speed.value = String(state.rate);
@@ -319,6 +446,18 @@ export async function initAudioPlayer(doc = globalThis.document, win = globalThi
   listen(next, 'click', () => reader.next());
   listen(restart, 'click', () => reader.restart());
   listen(seek, 'change', () => reader.seekTo(Number(seek.value)));
+  listen(follow, 'change', () => {
+    followEnabled = follow.checked;
+    try { win.localStorage.setItem('ai-daily-audio-follow', followEnabled ? 'on' : 'off'); } catch { /* Optional preference. */ }
+    if (followEnabled) syncReading(reader.state(), true);
+  });
+  listen(locate, 'click', () => syncReading(reader.state(), true));
+  listen(doc, 'visibilitychange', () => {
+    if (doc.visibilityState === 'hidden') return;
+    // Hidden timeupdates can advance the cue without moving the visible page.
+    lastReadingId = null; lastCueKey = null; lastReadingPhase = null;
+    update(reader.state());
+  });
   listen(speed, 'change', () => {
     reader.setRate(speed.value);
     try { win.localStorage.setItem('ai-daily-speech-rate', String(reader.state().rate)); } catch { /* Optional preference. */ }

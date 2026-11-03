@@ -2,6 +2,7 @@
 """Audio contract checks; the integration case uses local ffmpeg, no network."""
 
 import contextlib
+import copy
 import hashlib
 import io
 import json
@@ -15,6 +16,8 @@ from unittest.mock import patch
 import wave
 
 import audio
+
+SYNTHESIZE_ARTICLE = audio.synthesize_article
 
 
 def article(date="2026-11-03", index=1):
@@ -39,6 +42,22 @@ def write_wav(path, frames=800, rate=8000, padding=300):
         wav.setframerate(rate)
         signal = (struct.pack("<hh", 5000, -5000) * ((frames + 1) // 2))[:frames * 2]
         wav.writeframes(b"\0\0" * padding + signal + b"\0\0" * padding)
+
+
+def measured_fixture(item, output, calls=None):
+    """Exercise real segment assembly using known, unequal PCM utterance lengths."""
+    if calls is None:
+        calls = []
+
+    def fake_jtalk(arguments, *, input_text=None, **kwargs):
+        frames = 401 + len(calls) * 137
+        calls.append({"text": input_text.strip(), "frames": frames})
+        write_wav(Path(arguments[arguments.index("-ow") + 1]), frames=frames)
+        return ""
+
+    with patch.object(audio, "command", side_effect=fake_jtalk):
+        return SYNTHESIZE_ARTICLE(item, output,
+                                  {"open_jtalk": "fake-jtalk", "dictionary": "unused", "voice": "unused"})
 
 
 class ArticleContractTest(unittest.TestCase):
@@ -82,6 +101,22 @@ createHash('sha256').update(JSON.stringify([a.id,a.title,a.body,
         self.assertTrue(all("\n" not in chunk for chunk in chunks))
         self.assertEqual("".join("".join(chunks).split()), "".join(source.split()))
 
+    def test_segment_keys_use_body_paragraph_indexes_and_keep_public_display_text(self):
+        item = article()
+        item["body"] = "最初の段落。\n\n途中の段落。\n\n最後の段落。"
+        item["reading"]["sections"][1]["start"] = 2
+        segments = audio.speech_segments(item)
+        self.assertEqual([segment["key"] for segment in segments],
+                         ["title", "section-0", "paragraph-0", "paragraph-1", "section-2",
+                          "paragraph-2", "action-heading", "action"])
+        self.assertEqual(segments[0]["text"], item["title"])
+        self.assertEqual(segments[-2]["text"], "ひとつ、試してみる")
+        self.assertEqual(segments[-1]["text"], item["reading"]["action"])
+        paragraph_with_url = next(segment for segment in audio.speech_segments(article())
+                                  if segment["key"] == "paragraph-1")
+        self.assertEqual(paragraph_with_url["text"], audio.paragraphs(article())[1])
+        self.assertNotIn("https://", paragraph_with_url["spoken"])
+
     def test_malformed_dates_ids_and_sections_fail(self):
         bad_days = []
         bad = edition(); bad["date"] = "2026-02-30"; bad_days.append(bad)
@@ -122,6 +157,68 @@ createHash('sha256').update(JSON.stringify([a.id,a.title,a.body,
 
 
 class PcmContractTest(unittest.TestCase):
+    def test_cue_boundaries_use_actual_chunk_frames_and_become_absolute_day_times(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            item = article()
+            item["body"] = "長い段落の確認です。" * 35 + "\n\n短い段落。"
+            calls = []
+            measured = measured_fixture(item, root / "article.wav", calls)
+            expected = audio.speech_segments(item)
+            self.assertEqual([cue["key"] for cue in measured], [segment["key"] for segment in expected])
+            self.assertGreater(len(calls), len(measured), "Long paragraph must use multiple measured chunks")
+            lead = round(8000 * audio.LEADING_PAUSE_SECONDS)
+            tail = round(8000 * audio.TRAILING_PAUSE_SECONDS)
+            chunk_pause = round(8000 * audio.CHUNK_PAUSE_SECONDS)
+            cursor = 0
+            call_index = 0
+            for index, (cue, segment) in enumerate(zip(measured, expected)):
+                self.assertEqual(cue["startFrame"], cursor)
+                chunks = audio.speech_chunks(segment["spoken"])
+                self.assertEqual([call["text"] for call in calls[call_index:call_index + len(chunks)]], chunks)
+                signal_frames = sum(call["frames"] for call in calls[call_index:call_index + len(chunks)])
+                cursor += signal_frames + chunk_pause * len(chunks)
+                if index == 0:
+                    cursor += lead
+                if index == len(measured) - 1:
+                    cursor += tail - chunk_pause
+                self.assertEqual(cue["endFrame"], cursor)
+                self.assertEqual(cue["text"], segment["text"])
+                call_index += len(chunks)
+            with wave.open(str(root / "article.wav"), "rb") as wav:
+                self.assertEqual(wav.getnframes(), cursor)
+                raw = wav.readframes(cursor)
+            # Rebounding during day assembly must not shift any cue even one frame.
+            self.assertEqual(audio.bounded_pcm(root / "article.wav")[1], raw)
+            articles = [dict(item, id=f"2026-11-03-{index}") for index in range(1, 4)]
+            chapters, duration = audio.concatenate_articles(articles, [root / "article.wav"] * 3,
+                                                            root / "day.wav", [measured] * 3)
+            for index, chapter in enumerate(chapters):
+                self.assertEqual(chapter["cues"][0]["start"], chapter["start"])
+                self.assertEqual(chapter["cues"][-1]["end"], chapter["end"])
+                for local, absolute in zip(measured, chapter["cues"]):
+                    self.assertEqual(absolute["start"], (index * cursor + local["startFrame"]) / 8000)
+                    self.assertEqual(absolute["end"], (index * cursor + local["endFrame"]) / 8000)
+                    self.assertEqual(absolute["text"], local["text"])
+                for previous, following in zip(chapter["cues"], chapter["cues"][1:]):
+                    self.assertEqual(previous["end"], following["start"])
+            self.assertEqual(duration, 3 * cursor / 8000)
+
+    def test_mismatched_measured_cues_fail_before_publication(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            item = article()
+            measured = measured_fixture(item, root / "article.wav")
+            corruptions = [lambda cues: cues[1].update(startFrame=cues[1]["startFrame"] + 1),
+                           lambda cues: cues[-1].update(endFrame=cues[-1]["endFrame"] - 1),
+                           lambda cues: cues[0].update(text="違う記事のタイトル"),
+                           lambda cues: cues[2].update(key="paragraph-999")]
+            for corrupt in corruptions:
+                cues = copy.deepcopy(measured)
+                corrupt(cues)
+                with self.subTest(corrupt=corrupt), self.assertRaises(audio.AudioError):
+                    audio.concatenate_articles([item], [root / "article.wav"], root / "day.wav", [cues])
+
     def test_chapter_boundaries_match_exact_concatenated_wav_frames(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -173,9 +270,15 @@ class OpenJtalkLengthTest(unittest.TestCase):
             for count in [20, 80]:
                 item = {"id": "2026-11-03-1", "title": "長文の確認", "body": "最後の文章です。" * count}
                 path = Path(temporary) / f"{count}.wav"
-                audio.synthesize_article(item, path, tools)
+                cues = audio.synthesize_article(item, path, tools)
                 with wave.open(str(path), "rb") as wav:
                     durations.append(wav.getnframes() / wav.getframerate())
+                    self.assertEqual(cues[-1]["endFrame"], wav.getnframes())
+                    self.assertEqual(cues[0]["startFrame"], 0)
+                    pcm = wav.readframes(wav.getnframes())
+                self.assertEqual(audio.bounded_pcm(path)[1], pcm,
+                                 "Day assembly must preserve measured native-voice boundaries")
+                self.assertEqual([cue["key"] for cue in cues], ["title", "paragraph-0"])
             # An unsegmented 1.9 KB input is silently capped around 71 seconds;
             # correct synthesis scales with the full content (about fourfold).
             self.assertGreater(durations[1] / durations[0], 3.5)
@@ -198,7 +301,7 @@ class Mp3PublicationTest(unittest.TestCase):
 
     @staticmethod
     def fake_synthesis(item, output, tools):
-        write_wav(output, frames=800 + int(item["id"][-1]) * 100)
+        return measured_fixture(item, output)
 
     def test_real_encoder_file_hash_attribution_duration_and_latest_pruning(self):
         tools = {name: shutil.which(name) for name in ["ffmpeg", "ffprobe"]}
@@ -223,6 +326,13 @@ class Mp3PublicationTest(unittest.TestCase):
                 self.assertEqual(day["articles"][-1]["end"], day["duration"])
                 for previous, following in zip(day["articles"], day["articles"][1:]):
                     self.assertEqual(previous["end"], following["start"])
+                for chapter in day["articles"]:
+                    self.assertEqual(chapter["cues"][0]["start"], chapter["start"])
+                    self.assertEqual(chapter["cues"][-1]["end"], chapter["end"])
+                    self.assertEqual([cue["key"] for cue in chapter["cues"]],
+                                     [segment["key"] for segment in audio.speech_segments(article())])
+                    self.assertEqual([cue["text"] for cue in chapter["cues"]],
+                                     [segment["text"] for segment in audio.speech_segments(article())])
                 audio.validate_mp3(mp3, day["duration"], tools)
             actual_size = sum(path.stat().st_size for path in audio_dir.iterdir())
             self.assertEqual(result["bytes"], actual_size)

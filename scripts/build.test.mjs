@@ -10,6 +10,7 @@ import {createSpeechReader,splitForSpeech} from '../web/speech.mjs';
 import './audio-player.test.mjs';
 const day=JSON.parse(await readFile(new URL('../content/2026-10-25.json',import.meta.url),'utf8'));
 const context={title:'朝の3本',baseUrl:'https://example.test/ai-daily/',articles:day.articles};
+const withoutTemplates=html=>html.replace(/<template\b[^>]*>[\s\S]*?<\/template>/g,'');
 test('the visual edition has three stable, sourced articles',()=>{assert.equal(validateDay(day).length,3);});
 test('partial editions, invalid IDs and reference protocols are rejected',()=>{
  for(const modify of [d=>d.articles.pop(),d=>d.articles[0].id='wrong',d=>d.articles[0].sources[0].url='javascript:alert(1)',d=>d.articles[0].publishedAt='invalid']){
@@ -63,7 +64,7 @@ test('article metadata cannot inject SVG or HTML',()=>{
 test('older plain articles remain readable without broken illustration references',()=>{
  const a=structuredClone(day.articles[0]);delete a.reading;
  const html=renderArticle({...context,article:a}),rss=renderFeed({...context,articles:[a]});
- assert.ok(!html.includes('illustrations/'));
+ assert.ok(!withoutTemplates(html).includes('illustrations/'));
  assert.ok(!rss.includes('<media:thumbnail '));
  assert.ok(html.includes(a.body.split('\n\n')[0]));
 });
@@ -130,7 +131,7 @@ test('licensed photos and original charts keep their distinct attribution and re
  const html=renderArticle({...context,article:a}),rss=renderFeed({...context,articles:[a]});
  assert.ok(html.includes('写真（利用条件に基づき掲載）')&&rss.includes('CC BY-SA 4.0'));
  assert.ok(html.includes('href="https://creativecommons.org/licenses/by-sa/4.0/"'));
- assert.ok(!html.includes('class="story-visual"'));
+ assert.ok(!withoutTemplates(html).includes('class="story-visual"'));
  assert.ok(html.includes(`href="https://example.test/ai-daily/illustrations/${a.id}.svg"`));
  assert.ok(html.indexOf('class="reading-overview"')<html.indexOf('class="source-figure"'));
  for(const key of ['licenseTitle','licenseUrl']){
