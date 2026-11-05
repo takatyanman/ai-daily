@@ -32,7 +32,10 @@ jobs:
           SITE_BASE_URL: ${{ steps.pages.outputs.base_url }}
       - run: node scripts/rasterize.mjs
       - run: python3 scripts/audio_test.py
-      - run: python3 scripts/audio.py dist
+      - name: Reuse published audio and synthesize new dates
+        run: python3 scripts/audio.py dist --reuse-published "$AUDIO_ARCHIVE_URL"
+        env:
+          AUDIO_ARCHIVE_URL: ${{ steps.pages.outputs.base_url }}/audio/index.json
       - run: python3 scripts/check_feed.py dist
       - uses: actions/upload-pages-artifact@v3
         with:

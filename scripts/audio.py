@@ -2,7 +2,8 @@
 """Generate attributed, offline Japanese MP3 editions from public article JSON.
 
 Ubuntu dependencies: open-jtalk open-jtalk-mecab-naist-jdic
-hts-voice-nitech-jp-atr503-m001 ffmpeg. No network access or API is used here.
+hts-voice-nitech-jp-atr503-m001 ffmpeg. Speech synthesis runs offline; optional
+HTTPS archive reuse preserves published audio. No remote AI/TTS API is used.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ import array
 from contextlib import ExitStack
 import datetime as dt
 import hashlib
+import http.client
 import json
 import math
 import os
@@ -21,19 +23,25 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import wave
 
 
 ROOT = Path(__file__).resolve().parent.parent
 MAX_DAYS = 14
 MAX_OUTPUT_BYTES = 64 * 1024 * 1024
+MAX_ARCHIVE_MANIFEST_BYTES = 2 * 1024 * 1024
+ARCHIVE_DOWNLOAD_ATTEMPTS = 3
 MAX_ARTICLE_SECONDS = 1800
 MAX_INPUT_BYTES = 300
 MAX_TRACE_BYTES = 16 * 1024 * 1024
 MAX_TRACE_LABELS = 4096
 TRACE_TICKS_PER_SECOND = 10_000_000
 SLOW_PHONEME_SECONDS = 0.25
-SLOW_PHONEME_RUN = 5
+SLOW_PHONEME_RUN = 4
 MIN_REPAIR_BYTES = 30
 MAX_REPAIR_DEPTH = 6
 MAX_SYNTHESIS_CALLS = 31
@@ -53,6 +61,10 @@ URL = re.compile(r"https?://[^\s<>「」『』（）()、。]+", re.IGNORECASE)
 # Keep Latin words and formatted numbers intact across both kinds of splitting.
 # A comma/decimal point between digits belongs to the token, as does its percent.
 SPEECH_TOKEN = re.compile(r"[A-Za-z0-9_]+(?:[.,:/+\-][A-Za-z0-9_]+)*(?:[%％])?")
+MATH_OPERATORS = "×÷＋−－＝"
+NUMERIC_OPERAND = r"[0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?[%％]?"
+NUMERIC_EXPRESSION = re.compile(
+    rf"\s*{NUMERIC_OPERAND}(?:\s*[{MATH_OPERATORS}]\s*{NUMERIC_OPERAND})+\s*[。！？!?]?\s*")
 
 
 class AudioError(ValueError):
@@ -310,6 +322,24 @@ def split_slow_chunk(text: str) -> tuple[str, str]:
     return text[:cut], text[cut:]
 
 
+def split_short_numeric_expression(text: str) -> tuple[str, str] | None:
+    """A short formula can expand into many accent phrases; split only operators.
+
+    Ordinary short utterances retain the minimum-byte guard. Complete numeric
+    operands on both sides ensure a repair never separates a decimal/percent.
+    """
+    if not NUMERIC_EXPRESSION.fullmatch(text):
+        return None
+    total = len(text.encode("utf-8"))
+    candidates = [(index, size) for index, size in safe_split_offsets(text)
+                  if text[index - 1] in MATH_OPERATORS and
+                  re.search(r"[0-9]", text[index:])]
+    if not candidates:
+        return None
+    cut = min(candidates, key=lambda item: abs(item[1] - total / 2))[0]
+    return text[:cut], text[cut:]
+
+
 def synthesize_chunk(text: str, temporary: Path, tools: dict[str, str]) -> list[dict]:
     """Retain normal PCM; repair only verified slow chunks with bounded retries."""
     if not text.strip() or "\n" in text or "\r" in text or len(text.encode("utf-8")) > MAX_INPUT_BYTES:
@@ -332,9 +362,15 @@ def synthesize_chunk(text: str, temporary: Path, tools: dict[str, str]) -> list[
         rate, pcm = bounded_pcm(wav, leading_pause=0, trailing_pause=0)
         if slow_phoneme_run(phonemes) < SLOW_PHONEME_RUN:
             return [{"text": part, "rate": rate, "pcm": pcm, "phonemes": phonemes}]
-        if len(part.encode("utf-8")) <= MIN_REPAIR_BYTES or depth >= MAX_REPAIR_DEPTH:
+        if depth >= MAX_REPAIR_DEPTH:
             raise AudioError("Abnormally slow speech remains at the bounded minimum chunk size/depth")
-        left, right = split_slow_chunk(part)
+        if len(part.encode("utf-8")) <= MIN_REPAIR_BYTES:
+            split = split_short_numeric_expression(part)
+            if split is None:
+                raise AudioError("Abnormally slow speech remains at the bounded minimum chunk size/depth")
+            left, right = split
+        else:
+            left, right = split_slow_chunk(part)
         return synthesize(left, depth + 1) + synthesize(right, depth + 1)
 
     return synthesize(text, 0)
@@ -491,6 +527,8 @@ def validate_mp3(path: Path, expected_duration: float, tools: dict[str, str]) ->
             streams[0].get("channels") != 1 or not math.isfinite(duration) or
             abs(duration - expected_duration) > 0.15 or path.stat().st_size == 0 or
             tags.get("artist") != VOICE["credit"] or
+            VOICE["name"] not in tags.get("comment", "") or
+            tags.get("voice", VOICE["name"]) != VOICE["name"] or
             VOICE["licenseUrl"] not in tags.get("comment", "") or
             VOICE["sourceUrl"] not in tags.get("comment", "")):
         raise AudioError("Encoded MP3 failed format, duration, or attribution validation")
@@ -498,7 +536,177 @@ def validate_mp3(path: Path, expected_duration: float, tools: dict[str, str]) ->
     command([tools["ffmpeg"], "-v", "error", "-xerror", "-nostdin", "-i", str(path), "-f", "null", "-"])
 
 
-def build_audio(output: Path, project_root: Path = ROOT) -> dict:
+class RejectArchiveRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, response, code, message, headers, new_url):
+        raise AudioError("Published audio redirects are not allowed")
+
+
+def open_published_url(url: str):
+    request = urllib.request.Request(url, headers={"Accept-Encoding": "identity",
+                                                 "Cache-Control": "no-cache",
+                                                 "User-Agent": "ai-daily-audio-archive/1"})
+    return urllib.request.build_opener(RejectArchiveRedirects).open(request, timeout=30)
+
+
+def download_published(url: str, destination: Path, maximum: int) -> int:
+    """Download bounded HTTPS bytes; only transient failures receive retries."""
+    if maximum <= 0:
+        raise AudioError("Published audio exceeds the publication byte limit")
+    if urllib.parse.urlsplit(url).scheme != "https":
+        raise AudioError("Published audio downloads require HTTPS")
+    for attempt in range(ARCHIVE_DOWNLOAD_ATTEMPTS):
+        complete = False
+        try:
+            with open_published_url(url) as response, destination.open("wb") as output:
+                if response.geturl() != url or response.getcode() != 200:
+                    raise AudioError("Published audio returned an unexpected URL or HTTP status")
+                if response.headers.get("Content-Encoding", "identity").lower() != "identity":
+                    raise AudioError("Published audio must use an uncompressed HTTP response")
+                length = response.headers.get("Content-Length")
+                if length is not None and (not length.isdecimal() or not 0 < int(length) <= maximum):
+                    raise AudioError("Published audio has an invalid or oversized Content-Length")
+                size = 0
+                while block := response.read(min(64 * 1024, maximum - size + 1)):
+                    size += len(block)
+                    if size > maximum:
+                        raise AudioError("Published audio exceeds the download byte limit")
+                    output.write(block)
+                if size == 0 or (length is not None and size != int(length)):
+                    raise AudioError("Published audio download was empty or truncated")
+                complete = True
+                return size
+        except urllib.error.HTTPError as exc:
+            if exc.code not in (408, 429, 500, 502, 503, 504):
+                raise AudioError(f"Published audio download rejected: HTTP {exc.code}") from exc
+            failure = exc
+        except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.IncompleteRead) as exc:
+            failure = exc
+        finally:
+            # A partial download can never be mistaken for a successful archive.
+            if not complete:
+                destination.unlink(missing_ok=True)
+        if attempt + 1 < ARCHIVE_DOWNLOAD_ATTEMPTS:
+            destination.unlink(missing_ok=True)
+            time.sleep(0.5 * 2 ** attempt)
+    destination.unlink(missing_ok=True)
+    raise AudioError("Published audio download failed after bounded retries") from failure
+
+
+def trusted_archive_url(url: str, project_root: Path) -> str:
+    """Only the configured site's canonical HTTPS audio manifest is trusted."""
+    try:
+        base = json.loads((project_root / "site.json").read_text(encoding="utf-8"))["baseUrl"]
+        if not isinstance(base, str):
+            raise ValueError()
+        parsed = urllib.parse.urlsplit(base)
+        if (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or
+                parsed.query or parsed.fragment or not parsed.path.endswith("/") or parsed.port not in (None, 443)):
+            raise ValueError()
+        expected = urllib.parse.urljoin(base, "audio/index.json")
+        if url != expected:
+            raise ValueError()
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise AudioError("Published archive must be the configured site's canonical HTTPS audio/index.json") from exc
+    return expected
+
+
+def archive_number(value: object) -> bool:
+    try:
+        return type(value) in (int, float) and math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def validate_archive_day(date: str, entry: object, source: dict | None) -> None:
+    try:
+        if dt.date.fromisoformat(date).isoformat() != date:
+            raise ValueError()
+    except (TypeError, ValueError) as exc:
+        raise AudioError("Published archive has an invalid edition date") from exc
+    if not isinstance(entry, dict):
+        raise AudioError(f"Invalid published audio edition: {date}")
+    digest, filename, duration = entry.get("sha256"), entry.get("url"), entry.get("duration")
+    if (not isinstance(digest, str) or not re.fullmatch(r"[a-f0-9]{64}", digest) or
+            not isinstance(filename, str) or not MP3_FILE.fullmatch(filename) or
+            filename != f"{date}-{digest[:12]}.mp3" or not archive_number(duration) or
+            not 0 < duration <= 3 * MAX_ARTICLE_SECONDS):
+        raise AudioError(f"Invalid published audio URL, digest, or duration: {date}")
+    articles = entry.get("articles")
+    if not isinstance(articles, list) or len(articles) != 3:
+        raise AudioError(f"Published audio requires exactly three chapters: {date}")
+    cursor = 0
+    for index, chapter in enumerate(articles):
+        if (not isinstance(chapter, dict) or chapter.get("id") != f"{date}-{index + 1}" or
+                not isinstance(chapter.get("articleHash"), str) or
+                not re.fullmatch(r"[a-f0-9]{64}", chapter["articleHash"]) or
+                not isinstance(chapter.get("title"), str) or not chapter["title"].strip() or
+                not archive_number(chapter.get("start")) or not archive_number(chapter.get("end")) or
+                abs(chapter["start"] - cursor) > .001 or
+                not 0 <= chapter["start"] < chapter["end"] <= duration + .001):
+            raise AudioError(f"Invalid published audio chapter: {date}")
+        article = source["articles"][index] if source else None
+        if article and (chapter["title"] != article["title"] or chapter["articleHash"] != article_hash(article)):
+            raise AudioError(f"Published audio source mismatch; refusing to regenerate {article['id']}")
+        cues = chapter.get("cues")
+        if "cues" in chapter:
+            if not isinstance(cues, list):
+                raise AudioError(f"Invalid published audio cues: {date}")
+            expected = speech_segments(article) if article else None
+            if cues and expected is not None and len(cues) != len(expected):
+                raise AudioError(f"Published audio cue text does not match its source: {date}")
+            cue_cursor = chapter["start"]
+            for cue_index, cue in enumerate(cues):
+                if (not isinstance(cue, dict) or not isinstance(cue.get("key"), str) or
+                        not isinstance(cue.get("text"), str) or
+                        not archive_number(cue.get("start")) or not archive_number(cue.get("end")) or
+                        abs(cue["start"] - cue_cursor) > .001 or
+                        not chapter["start"] <= cue["start"] < cue["end"] <= chapter["end"] + .001 or
+                        (expected is not None and (cue["key"] != expected[cue_index]["key"] or
+                                                  cue["text"] != expected[cue_index]["text"]))):
+                    raise AudioError(f"Invalid published audio cue boundary or text: {date}")
+                cue_cursor = cue["end"]
+            if cues and abs(cue_cursor - chapter["end"]) > .001:
+                raise AudioError(f"Published audio cues do not cover their chapter: {date}")
+        cursor = chapter["end"]
+    if abs(cursor - duration) > .001:
+        raise AudioError(f"Published audio chapters do not cover their edition: {date}")
+
+
+def load_published_archive(url: str, days: list[dict], project_root: Path, temporary: Path) -> dict:
+    url = trusted_archive_url(url, project_root)
+    path = temporary / "published-index.json"
+    download_published(url, path, MAX_ARCHIVE_MANIFEST_BYTES)
+
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise AudioError("Published audio manifest contains duplicate JSON keys")
+            result[key] = value
+        return result
+
+    def invalid_constant(value):
+        raise AudioError("Non-finite published JSON number")
+
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=unique_object,
+                              parse_constant=invalid_constant)
+    except (ValueError, UnicodeError) as exc:
+        raise AudioError("Invalid published audio manifest JSON") from exc
+    if (not isinstance(manifest, dict) or type(manifest.get("version")) is not int or manifest["version"] != 1 or
+            manifest.get("voice") != VOICE or not isinstance(manifest.get("days"), dict) or
+            not 0 < len(manifest["days"]) <= MAX_DAYS):
+        raise AudioError("Published audio manifest has an invalid version, voice, or edition count")
+    sources = {day["date"]: day for day in days}
+    for date, entry in manifest["days"].items():
+        validate_archive_day(date, entry, sources.get(date))
+    last_published = max(manifest["days"])
+    if any(day["date"] not in manifest["days"] and day["date"] <= last_published for day in days):
+        raise AudioError("An older source edition is absent from the published archive; refusing to regenerate it")
+    return manifest["days"]
+
+
+def build_audio(output: Path, project_root: Path = ROOT, *, published_archive: str | None = None) -> dict:
     project_root = project_root.resolve()
     output = Path(output)
     if not output.is_absolute():
@@ -523,7 +731,22 @@ def build_audio(output: Path, project_root: Path = ROOT) -> dict:
     # This directory is deleted on either success or failure and never published.
     with tempfile.TemporaryDirectory(prefix="daily-audio-") as temporary:
         temporary = Path(temporary)
+        published = (load_published_archive(published_archive, days, project_root, temporary)
+                     if published_archive is not None else {})
         for day in days:
+            if day["date"] in published:
+                entry = published[day["date"]]
+                mp3 = temporary / entry["url"]
+                url = urllib.parse.urljoin(published_archive, entry["url"])
+                total_bytes += download_published(url, mp3, MAX_OUTPUT_BYTES - total_bytes)
+                if hashlib.sha256(mp3.read_bytes()).hexdigest() != entry["sha256"]:
+                    raise AudioError(f"Published MP3 digest mismatch: {day['date']}")
+                validate_mp3(mp3, entry["duration"], tools)
+                staged.append((mp3, entry["url"]))
+                # Preserve every chapter/cue and other edition metadata verbatim.
+                manifest["days"][day["date"]] = entry
+                print(f"audio: {day['date']}: reused published bytes and metadata", flush=True)
+                continue
             wavs = []
             cue_frames = []
             for article in day["articles"]:
@@ -585,9 +808,11 @@ def build_audio(output: Path, project_root: Path = ROOT) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path, help="Existing static build directory, e.g. dist")
+    parser.add_argument("--reuse-published", metavar="HTTPS_MANIFEST_URL",
+                        help="Reuse verified published MP3 bytes/metadata; synthesize only newer unpublished editions")
     args = parser.parse_args()
     try:
-        print(compact_json(build_audio(args.output)))
+        print(compact_json(build_audio(args.output, published_archive=args.reuse_published)))
     except (AudioError, OSError, json.JSONDecodeError) as exc:
         print(f"audio: {exc}", file=sys.stderr)
         return 1

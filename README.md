@@ -48,7 +48,7 @@ GitHub Pagesもリポジトリのファイル・履歴も公開です。検索�
 
 音声は公開記事だけからOpen JTalkで生成します。外部の音声API、APIキー、有料素材は使いません。音声モデルはNitechの `nitech_jp_atr503_m001`（Nagoya Institute of Technology・Tokyo Institute of Technology、[CC BY 3.0](https://creativecommons.org/licenses/by/3.0/)）です。[音声モデルの出典と利用条件](https://changelogs.ubuntu.com/changelogs/pool/multiverse/h/hts-voice-nitech-jp-atr503-m001/hts-voice-nitech-jp-atr503-m001_1.05-8/copyright)を画面とMP3にも記載します。固有名詞や数字の発音が不自然になる場合があります。
 
-音声はビルド時に生成し、リポジトリへは保存しません。音声出力は64MiB以内に制限し、既存のPages成果物を保存期間1日でアップロードします。日付が対象外、本文と音声が不一致、取得に失敗した場合は、開いている記事だけの端末読み上げへ切り替えられます。この代替モードでは画面ロック時に停止する場合があります。
+公開ビルドでは、公開済みの日付のMP3・日別メタデータ・読み上げ位置情報をそのまま引き継ぎ、新しい未公開日付だけ音声を生成します。既存音声の取得や整合性確認に失敗した場合は、過去分を再生成せず公開を停止します。記事や音声の改善は新規記事に適用します。音声をリポジトリへは保存せず、音声出力は64MiB以内に制限し、Pages成果物の保存期間は1日です。日付が対象外、本文と音声が不一致、取得に失敗した場合は、開いている記事だけの端末読み上げへ切り替えられます。この代替モードでは画面ロック時に停止する場合があります。
 
 ## ローカル検証
 
@@ -58,7 +58,7 @@ node scripts/build.test.mjs
 node scripts/build.mjs
 node scripts/rasterize.mjs
 python3 scripts/audio_test.py
-python3 scripts/audio.py dist
+python3 scripts/audio.py dist --reuse-published https://takatyanman.github.io/ai-daily/audio/index.json
 python3 scripts/check_feed.py dist
 ```
 

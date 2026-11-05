@@ -13,6 +13,7 @@ import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
+import urllib.error
 import wave
 
 import audio
@@ -338,6 +339,29 @@ class TraceAndRepairTest(unittest.TestCase):
         self.assertEqual(audio.slow_phoneme_run([("a", .4)] * 4 + [("pau", 1)] + [("a", .4)] * 4), 4)
         self.assertEqual(audio.slow_phoneme_run([("sil", 3), ("pau", 2)] * 8), 0)
         self.assertEqual(audio.slow_phoneme_run([("a", .3)] * 5), 5)
+        self.assertLess(audio.slow_phoneme_run([("d", .435), ("e", .435), ("k", .435)]),
+                        audio.SLOW_PHONEME_RUN)
+        self.assertGreaterEqual(audio.slow_phoneme_run([("d", .435), ("e", .435), ("k", .435), ("i", .435)]),
+                                audio.SLOW_PHONEME_RUN)
+
+    def test_isolated_long_vowels_and_runs_of_three_retain_original_pcm(self):
+        cases = [[("a", 4800), ("i", 400)],
+                 [("a", 2400), ("i", 2400), ("u", 2400)],
+                 [("d", 2400), ("e", 2400), ("k", 2400), ("pau", 320),
+                  ("a", 2400), ("i", 2400), ("u", 2400)]]
+        with tempfile.TemporaryDirectory() as temporary:
+            for phones in cases:
+                frames = sum(frames for _, frames in phones)
+                def synth(arguments, *, input_text=None, **kwargs):
+                    write_wav(Path(arguments[arguments.index("-ow") + 1]), frames=frames, padding=320)
+                    write_trace(Path(arguments[arguments.index("-ot") + 1]), [("sil", 320), *phones, ("sil", 320)])
+                    return ""
+                with self.subTest(phones=phones), patch.object(audio, "command", side_effect=synth) as command:
+                    leaves = audio.synthesize_chunk("自然な短い発声の確認です。", Path(temporary), self.tools)
+                self.assertEqual(command.call_count, 1)
+                self.assertEqual(len(leaves), 1)
+                self.assertLess(audio.slow_phoneme_run(leaves[0]["phonemes"]), audio.SLOW_PHONEME_RUN)
+                self.assertEqual(leaves[0]["pcm"], struct.pack("<hh", 5000, -5000) * (frames // 2))
 
     def test_repair_split_preserves_spaces_numbers_and_latin_words(self):
         for token in ("4,239", "1,000", "7.5％", "WACC"):
@@ -350,6 +374,57 @@ class TraceAndRepairTest(unittest.TestCase):
         self.assertEqual("".join(audio.split_slow_chunk(source)), source)
         with self.assertRaises(audio.AudioError):
             audio.split_slow_chunk("WACC")
+
+    def test_short_numeric_expression_split_requires_complete_operands(self):
+        for source in ("7.5％×0.4＋1.5％", " 1,000.5％＋7.5％。 ", "1＋2＝3。"):
+            with self.subTest(source=source):
+                split = audio.split_short_numeric_expression(source)
+                self.assertIsNotNone(split)
+                left, right = split
+                self.assertEqual(left + right, source)
+                self.assertIn(left[-1], audio.MATH_OPERATORS)
+                self.assertTrue(any(char.isdigit() for char in right))
+                for token in audio.SPEECH_TOKEN.findall(source):
+                    self.assertTrue(token in left or token in right)
+        for source in ("WACC", "短い日本語です。", "WACC＋1.5％", "7.5％×", "×0.4＋1.5％",
+                       "7.5％×0.4＋", "7.5％×0.4円", "7.5％×0..4", "1,00＋2", "1.5％％＋2",
+                       "1＋2。本文", "12345"):
+            with self.subTest(source=source):
+                self.assertIsNone(audio.split_short_numeric_expression(source))
+
+    def test_only_verified_slow_complete_short_formulas_can_retry(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            formula = "7.5％×0.4＋1.5％"
+            def synth(arguments, *, input_text=None, **kwargs):
+                return synthetic_jtalk(arguments, input_text, slow=input_text.strip() == formula)
+            with patch.object(audio, "command", side_effect=synth) as command:
+                leaves = audio.synthesize_chunk(formula, root, self.tools)
+            self.assertEqual(command.call_count, 3)
+            self.assertEqual("".join(leaf["text"] for leaf in leaves), formula)
+            self.assertEqual(len(leaves), 2)
+            with patch.object(audio, "command", side_effect=synthetic_jtalk) as command:
+                normal = audio.synthesize_chunk(formula, root, self.tools)
+            self.assertEqual(command.call_count, 1)
+            self.assertEqual(len(normal), 1)
+            for source in ("WACC", "短い日本語です。", "7.5％×", "WACC＋1.5％"):
+                def always_slow(arguments, *, input_text=None, **kwargs):
+                    return synthetic_jtalk(arguments, input_text, slow=True)
+                with self.subTest(source=source), patch.object(audio, "command", side_effect=always_slow) as command, \
+                        self.assertRaises(audio.AudioError):
+                    audio.synthesize_chunk(source, root, self.tools)
+                self.assertEqual(command.call_count, 1)
+
+    def test_short_formula_repairs_retain_depth_and_call_limits(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            def always_slow(arguments, *, input_text=None, **kwargs):
+                return synthetic_jtalk(arguments, input_text, slow=True)
+            for name, limit in (("MAX_REPAIR_DEPTH", 0), ("MAX_SYNTHESIS_CALLS", 1)):
+                with self.subTest(limit=name), patch.object(audio, name, limit), \
+                        patch.object(audio, "command", side_effect=always_slow) as command, \
+                        self.assertRaises(audio.AudioError):
+                    audio.synthesize_chunk("7.5％×0.4＋1.5％", Path(temporary), self.tools)
+                self.assertEqual(command.call_count, 1)
 
     def test_adaptive_splits_preserve_text_and_keep_each_normal_leaf(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -521,6 +596,51 @@ class NativeSpeechRepairTest(unittest.TestCase):
                                         <= .25 for leaf in leaves))
                     self.assertLess(sum(len(leaf["pcm"]) / 2 / leaf["rate"] + .2 for leaf in leaves), previous * .85)
 
+    def test_published_short_numeric_formula_is_repaired_without_splitting_numbers(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for text in ("7.5％×0.4＋1.5％", "7.5％×0.4＋1.5％×0.6＝3.9％。"):
+                with self.subTest(text=text):
+                    phones, rate, pcm = self.baseline(text, root)
+                    self.assertGreaterEqual(audio.slow_phoneme_run(phones), 5)
+                    with patch.object(audio, "command", wraps=audio.command) as command:
+                        leaves = audio.synthesize_chunk(text, root, self.tools)
+                    self.assertLessEqual(command.call_count, audio.MAX_SYNTHESIS_CALLS)
+                    self.assertEqual("".join(leaf["text"] for leaf in leaves), text)
+                    for token in audio.SPEECH_TOKEN.findall(text):
+                        self.assertTrue(any(token in leaf["text"] for leaf in leaves))
+                    self.assertTrue(all(audio.slow_phoneme_run(leaf["phonemes"]) == 0 for leaf in leaves))
+                    self.assertLessEqual(max(seconds for leaf in leaves for phone, seconds in leaf["phonemes"]
+                                             if phone not in ("sil", "pau")), .25)
+                    self.assertLess(sum(len(leaf["pcm"]) / 2 / leaf["rate"] + .2 for leaf in leaves),
+                                    (len(pcm) / 2 / rate + .2) * .75)
+            normal = "7.5％×0.4"
+            _, _, pcm = self.baseline(normal, root)
+            with patch.object(audio, "command", wraps=audio.command) as command:
+                leaves = audio.synthesize_chunk(normal, root, self.tools)
+            self.assertEqual(command.call_count, 1)
+            self.assertEqual(leaves[0]["pcm"], pcm)
+
+    def test_four_stretched_consonants_and_vowels_in_published_chunk_are_repaired(self):
+        text = ("従来は故障情報でエリアを絞り、現地でケースを一つずつ開けていました。"
+                "新しい浸水検知モジュールをケース内に設置すると浸水箇所を特定でき、"
+                "開けるケースは1箇所に。過去の事象を例にした比較では、")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            phones, rate, pcm = self.baseline(text, root)
+            self.assertEqual(audio.slow_phoneme_run(phones), 4)
+            stretched = [(phone, seconds) for phone, seconds in phones
+                         if phone not in ("sil", "pau") and seconds > .25]
+            self.assertEqual([phone for phone, _ in stretched], ["d", "e", "k", "i"])
+            self.assertTrue(all(abs(seconds - .435) < .005 for _, seconds in stretched))
+            leaves = audio.synthesize_chunk(text, root, self.tools)
+            self.assertEqual("".join(leaf["text"] for leaf in leaves), text)
+            self.assertTrue(all(audio.slow_phoneme_run(leaf["phonemes"]) == 0 for leaf in leaves))
+            self.assertLessEqual(max(seconds for leaf in leaves for phone, seconds in leaf["phonemes"]
+                                     if phone not in ("sil", "pau")), .25)
+            self.assertLess(sum(len(leaf["pcm"]) / 2 / leaf["rate"] + .2 for leaf in leaves),
+                            len(pcm) / 2 / rate + .2 - 1)
+
 
 class OpenJtalkLengthTest(unittest.TestCase):
     def test_long_article_is_not_truncated_by_cli_line_or_byte_buffer(self):
@@ -629,6 +749,282 @@ class Mp3PublicationTest(unittest.TestCase):
                     patch.object(audio, "command", side_effect=synth), self.assertRaises(audio.AudioError):
                 audio.build_audio(root / "dist", root)
             self.assertEqual({path.name: path.read_bytes() for path in audio_dir.iterdir()}, before)
+
+
+class ArchiveResponse(io.BytesIO):
+    def __init__(self, payload, url, *, headers=None, status=200):
+        super().__init__(payload)
+        self.url = url
+        self.status = status
+        self.headers = {"Content-Length": str(len(payload))} if headers is None else headers
+
+    def geturl(self):
+        return self.url
+
+    def getcode(self):
+        return self.status
+
+
+@unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "Local ffmpeg/ffprobe required")
+class PublishedArchiveTest(unittest.TestCase):
+    manifest_url = "https://example.test/ai-daily/audio/index.json"
+    base_url = "https://example.test/ai-daily/"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tools = {name: shutil.which(name) for name in ("ffmpeg", "ffprobe")}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            audio_dir = Mp3PublicationTest.make_project(cls, root)
+            (root / "content" / "2026-11-03.json").unlink()
+            with patch.object(audio, "toolchain", return_value=cls.tools), \
+                    patch.object(audio, "synthesize_article", side_effect=Mp3PublicationTest.fake_synthesis), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                audio.build_audio(root / "dist", root)
+            cls.archive = json.loads((audio_dir / "index.json").read_text())
+            cls.mp3s = {path.name: path.read_bytes() for path in audio_dir.glob("*.mp3")}
+
+    def make_project(self, root):
+        directory = Mp3PublicationTest.make_project(self, root)
+        (root / "site.json").write_text(json.dumps({"baseUrl": self.base_url}))
+        return directory
+
+    def network(self, manifest=None, payloads=None):
+        manifest = self.archive if manifest is None else manifest
+        files = self.mp3s if payloads is None else payloads
+        def fetch(url):
+            if url == self.manifest_url:
+                return ArchiveResponse(json.dumps(manifest, ensure_ascii=False).encode(), url)
+            filename = url.removeprefix(self.manifest_url.removesuffix("index.json"))
+            if filename not in files:
+                raise AssertionError(f"Unexpected archive request: {url}")
+            return ArchiveResponse(files[filename], url)
+        return fetch
+
+    def test_old_bytes_and_metadata_are_unchanged_and_only_new_day_is_synthesized(self):
+        manifest = copy.deepcopy(self.archive)
+        manifest["days"]["2026-11-01"]["legacyField"] = {"preserve": ["all", "metadata", 1.25]}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = self.make_project(root)
+            with patch.object(audio, "toolchain", return_value=self.tools), \
+                    patch.object(audio, "open_published_url", side_effect=self.network(manifest)) as fetch, \
+                    patch.object(audio, "synthesize_article", side_effect=Mp3PublicationTest.fake_synthesis) as synth, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                result = audio.build_audio(root / "dist", root, published_archive=self.manifest_url)
+            actual = json.loads((directory / "index.json").read_text())
+            self.assertEqual([call.args[0]["id"] for call in synth.call_args_list],
+                             [f"2026-11-03-{index}" for index in range(1, 4)])
+            self.assertEqual(fetch.call_count, 3)
+            for date, entry in manifest["days"].items():
+                self.assertEqual(actual["days"][date], entry)
+                self.assertEqual((directory / entry["url"]).read_bytes(), self.mp3s[entry["url"]])
+            self.assertEqual(result["days"], 3)
+            self.assertEqual(len(list(directory.glob("*.mp3"))), 3)
+            self.assertLessEqual(result["bytes"], audio.MAX_OUTPUT_BYTES)
+
+    def test_an_all_published_build_never_synthesizes_or_examines_phonemes(self):
+        manifest = copy.deepcopy(self.archive)
+        # Older chapter-only editions remain usable without inventing new cues.
+        for chapter in manifest["days"]["2026-11-01"]["articles"]:
+            chapter.pop("cues")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = self.make_project(root)
+            (root / "content" / "2026-11-03.json").unlink()
+            with patch.object(audio, "toolchain", return_value=self.tools), \
+                    patch.object(audio, "open_published_url", side_effect=self.network(manifest)), \
+                    patch.object(audio, "synthesize_article", side_effect=AssertionError("Old audio must not be synthesized")), \
+                    patch.object(audio, "read_synthesis_trace", side_effect=AssertionError("Old phonemes must not be inspected")), \
+                    patch.object(audio, "encode_mp3", side_effect=AssertionError("Old MP3s must not be re-encoded")), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                audio.build_audio(root / "dist", root, published_archive=self.manifest_url)
+            self.assertEqual(json.loads((directory / "index.json").read_text())["days"], manifest["days"])
+            for entry in manifest["days"].values():
+                self.assertEqual((directory / entry["url"]).read_bytes(), self.mp3s[entry["url"]])
+
+    def test_untrusted_manifest_paths_and_origins_fail_before_network_or_synthesis(self):
+        invalid = ["", "http://example.test/ai-daily/audio/index.json",
+                   "https://other.test/ai-daily/audio/index.json",
+                   "https://example.test/other/audio/index.json",
+                   self.manifest_url + "?token=bad", self.manifest_url + "#bad",
+                   "https://user@example.test/ai-daily/audio/index.json"]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = self.make_project(root)
+            before = {path.name: path.read_bytes() for path in directory.iterdir()}
+            for url in invalid:
+                with self.subTest(url=url), patch.object(audio, "toolchain", return_value=self.tools), \
+                        patch.object(audio, "open_published_url") as fetch, \
+                        patch.object(audio, "synthesize_article") as synth, self.assertRaises(audio.AudioError):
+                    audio.build_audio(root / "dist", root, published_archive=url)
+                fetch.assert_not_called()
+                synth.assert_not_called()
+                self.assertEqual({path.name: path.read_bytes() for path in directory.iterdir()}, before)
+
+    def test_archive_download_limits_preserve_existing_publication(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = self.make_project(root)
+            before = {path.name: path.read_bytes() for path in directory.iterdir()}
+            for name in ("MAX_ARCHIVE_MANIFEST_BYTES", "MAX_OUTPUT_BYTES"):
+                with self.subTest(limit=name), patch.object(audio, name, 1), \
+                        patch.object(audio, "toolchain", return_value=self.tools), \
+                        patch.object(audio, "open_published_url", side_effect=self.network()), \
+                        patch.object(audio, "synthesize_article") as synth, self.assertRaises(audio.AudioError):
+                    audio.build_audio(root / "dist", root, published_archive=self.manifest_url)
+                synth.assert_not_called()
+                self.assertEqual({path.name: path.read_bytes() for path in directory.iterdir()}, before)
+
+    def test_latest_fourteen_reuse_keeps_only_thirteen_old_files_and_one_new_day(self):
+        archive = {"version": 1, "voice": dict(audio.VOICE), "days": {}}
+        files = {}
+        template = self.archive["days"]["2026-11-01"]
+        days = [(audio.dt.date(2026, 10, 20) + audio.dt.timedelta(days=index)).isoformat() for index in range(15)]
+        for date in days[:-1]:
+            entry = copy.deepcopy(template)
+            entry["url"] = f"{date}-{entry['sha256'][:12]}.mp3"
+            for chapter, item in zip(entry["articles"], edition(date)["articles"]):
+                chapter.update(id=item["id"], articleHash=audio.article_hash(item))
+            archive["days"][date] = entry
+            files[entry["url"]] = self.mp3s[template["url"]]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = self.make_project(root)
+            for path in (root / "content").iterdir():
+                path.unlink()
+            for date in days:
+                (root / "content" / f"{date}.json").write_text(json.dumps(edition(date)))
+            with patch.object(audio, "toolchain", return_value=self.tools), \
+                    patch.object(audio, "open_published_url", side_effect=self.network(archive, files)) as fetch, \
+                    patch.object(audio, "synthesize_article", side_effect=Mp3PublicationTest.fake_synthesis) as synth, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                result = audio.build_audio(root / "dist", root, published_archive=self.manifest_url)
+            manifest = json.loads((directory / "index.json").read_text())
+            self.assertEqual(list(manifest["days"]), days[1:])
+            self.assertEqual(result["days"], 14)
+            self.assertEqual(len(list(directory.glob("*.mp3"))), 14)
+            self.assertEqual(fetch.call_count, 14)  # manifest + 13 retained published files
+            self.assertTrue(all(call.args[0]["id"].startswith(days[-1]) for call in synth.call_args_list))
+            self.assertEqual(synth.call_count, 3)
+            for date in days[1:-1]:
+                self.assertEqual(manifest["days"][date], archive["days"][date])
+
+    def test_invalid_archive_metadata_or_source_never_regenerates_or_replaces_existing_audio(self):
+        def first(manifest):
+            return manifest["days"]["2026-11-01"]
+        corruptions = [lambda m: m["voice"].update(name="Unknown voice"),
+                       lambda m: m.update(version=True),
+                       lambda m: first(m).update(url="../2026-11-01-000000000000.mp3"),
+                       lambda m: first(m).update(url="https://other.test/audio.mp3"),
+                       lambda m: first(m).update(url=first(m)["url"] + "?token=bad"),
+                       lambda m: first(m).update(sha256="0" * 64),
+                       lambda m: first(m).update(duration=float("nan")),
+                       lambda m: first(m).update(duration=10 ** 999),
+                       lambda m: first(m)["articles"][0].update(id="2026-11-01-2"),
+                       lambda m: first(m)["articles"][0].update(articleHash="0" * 64),
+                       lambda m: first(m)["articles"][0].update(title="Changed public title"),
+                       lambda m: first(m)["articles"][1].update(start=999),
+                       lambda m: first(m)["articles"][0]["cues"][0].update(text="Changed cue text"),
+                       lambda m: first(m)["articles"][0]["cues"][0].update(end=999),
+                       lambda m: first(m)["articles"][0].update(cues=None),
+                       lambda m: m["days"].pop("2026-11-01")]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = self.make_project(root)
+            before = {path.name: path.read_bytes() for path in directory.iterdir()}
+            for corrupt in corruptions:
+                manifest = copy.deepcopy(self.archive)
+                corrupt(manifest)
+                with self.subTest(corrupt=corrupt), patch.object(audio, "toolchain", return_value=self.tools), \
+                        patch.object(audio, "open_published_url", side_effect=self.network(manifest)), \
+                        patch.object(audio, "synthesize_article") as synth, self.assertRaises(audio.AudioError):
+                    audio.build_audio(root / "dist", root, published_archive=self.manifest_url)
+                synth.assert_not_called()
+                self.assertEqual({path.name: path.read_bytes() for path in directory.iterdir()}, before)
+
+    def test_bad_mp3_bytes_duration_and_attribution_preserve_previous_publication(self):
+        first_date = "2026-11-01"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = self.make_project(root)
+            before = {path.name: path.read_bytes() for path in directory.iterdir()}
+            for corruption in ("bytes", "duration", "damaged", "attribution"):
+                manifest = copy.deepcopy(self.archive)
+                payloads = dict(self.mp3s)
+                entry = manifest["days"][first_date]
+                if corruption == "bytes":
+                    payloads[entry["url"]] = b"different bytes"
+                elif corruption == "duration":
+                    entry["duration"] += 1
+                    entry["articles"][-1]["end"] += 1
+                    entry["articles"][-1]["cues"][-1]["end"] += 1
+                else:
+                    original = self.mp3s[entry["url"]]
+                    data = b"broken MP3" if corruption == "damaged" else original
+                    if corruption == "attribution":
+                        for encoding in ("utf-8", "utf-16-le"):
+                            needle = audio.VOICE["sourceUrl"].encode(encoding)
+                            data = data.replace(needle, b"x" * len(needle))
+                        self.assertNotEqual(data, original)
+                    digest = hashlib.sha256(data).hexdigest()
+                    entry.update(url=f"{first_date}-{digest[:12]}.mp3", sha256=digest)
+                    payloads[entry["url"]] = data
+                with self.subTest(corruption=corruption), patch.object(audio, "toolchain", return_value=self.tools), \
+                        patch.object(audio, "open_published_url", side_effect=self.network(manifest, payloads)), \
+                        patch.object(audio, "synthesize_article") as synth, \
+                        self.assertRaises(audio.AudioError):
+                    audio.build_audio(root / "dist", root, published_archive=self.manifest_url)
+                synth.assert_not_called()
+                self.assertEqual({path.name: path.read_bytes() for path in directory.iterdir()}, before)
+
+    def test_fetch_denial_and_exhausted_transient_retries_never_fall_back_to_regeneration(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = self.make_project(root)
+            before = {path.name: path.read_bytes() for path in directory.iterdir()}
+            for code, expected in ((401, 1), (403, 1), (404, 1), (503, audio.ARCHIVE_DOWNLOAD_ATTEMPTS)):
+                error = urllib.error.HTTPError(self.manifest_url, code, "test failure", {}, None)
+                with self.subTest(code=code), patch.object(audio, "toolchain", return_value=self.tools), \
+                        patch.object(audio, "open_published_url", side_effect=error) as fetch, \
+                        patch.object(audio.time, "sleep"), patch.object(audio, "synthesize_article") as synth, \
+                        self.assertRaises(audio.AudioError):
+                    audio.build_audio(root / "dist", root, published_archive=self.manifest_url)
+                self.assertEqual(fetch.call_count, expected)
+                synth.assert_not_called()
+                self.assertEqual({path.name: path.read_bytes() for path in directory.iterdir()}, before)
+
+    def test_streaming_caps_truncation_redirects_and_transient_retry(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "download"
+            cases = [(ArchiveResponse(b"abcd", self.manifest_url, headers={}), 3),
+                     (ArchiveResponse(b"a", self.manifest_url, headers={"Content-Length": "99"}), 3),
+                     (ArchiveResponse(b"a", self.manifest_url, headers={"Content-Length": "2"}), 3),
+                     (ArchiveResponse(b"", self.manifest_url, headers={}), 3),
+                     (ArchiveResponse(b"a", "https://other.test/redirect"), 3),
+                     (ArchiveResponse(b"a", self.manifest_url, status=206), 3)]
+            for response, limit in cases:
+                with self.subTest(response=response), patch.object(audio, "open_published_url", return_value=response), \
+                        self.assertRaises(audio.AudioError):
+                    audio.download_published(self.manifest_url, path, limit)
+                self.assertFalse(path.exists())
+            with patch.object(audio, "open_published_url", side_effect=[urllib.error.URLError("temporary"),
+                              ArchiveResponse(b"ok", self.manifest_url)]) as fetch, patch.object(audio.time, "sleep"):
+                self.assertEqual(audio.download_published(self.manifest_url, path, 3), 2)
+            self.assertEqual(fetch.call_count, 2)
+            self.assertEqual(path.read_bytes(), b"ok")
+            with self.assertRaises(audio.AudioError):
+                audio.RejectArchiveRedirects().redirect_request(None, None, 302, "redirect", {}, "https://other.test/")
+
+    def test_archive_requests_revalidate_the_exact_url_without_redirects(self):
+        with patch.object(audio.urllib.request, "build_opener") as build:
+            audio.open_published_url(self.manifest_url)
+        self.assertIs(build.call_args.args[0], audio.RejectArchiveRedirects)
+        request = build.return_value.open.call_args.args[0]
+        self.assertEqual(request.full_url, self.manifest_url)
+        self.assertEqual(request.get_header("Cache-control"), "no-cache")
+        self.assertEqual(request.get_header("Accept-encoding"), "identity")
+        self.assertEqual(build.return_value.open.call_args.kwargs["timeout"], 30)
 
 
 if __name__ == "__main__":
