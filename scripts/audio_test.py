@@ -44,15 +44,39 @@ def write_wav(path, frames=800, rate=8000, padding=300):
         wav.writeframes(b"\0\0" * padding + signal + b"\0\0" * padding)
 
 
+def write_trace(path, phonemes, rate=8000, period=40):
+    labels = []
+    cursor = 0
+    for phone, frames in phonemes:
+        end = cursor + frames
+        labels.append(f"{cursor * audio.TRACE_TICKS_PER_SECOND // rate} "
+                      f"{end * audio.TRACE_TICKS_PER_SECOND // rate} "
+                      f"xx^xx-{phone}+xx=xx/A:xx+xx+xx/F:1_1#0_xx@1_1|1_1")
+        cursor = end
+    path.write_text("[Output label]\n" + "\n".join(labels) +
+                    f"\n\n[Global parameter]\nSampring frequency -> {rate}(Hz)\n"
+                    f"Frame period -> {period}(point)\n{1000 * period / rate:.5f}(msec)\n\n"
+                    f"[Generated sequence]\nNumber of HMMs -> {len(labels)}\n", encoding="utf-8")
+
+
+def synthetic_jtalk(arguments, input_text, slow=False):
+    phones = [("a", 2400)] * 5 if slow else [("a", 400)]
+    frames = sum(frames for _, frames in phones)
+    write_wav(Path(arguments[arguments.index("-ow") + 1]), frames=frames, padding=320)
+    write_trace(Path(arguments[arguments.index("-ot") + 1]), [("sil", 320), *phones, ("sil", 320)])
+    return ""
+
+
 def measured_fixture(item, output, calls=None):
     """Exercise real segment assembly using known, unequal PCM utterance lengths."""
     if calls is None:
         calls = []
 
     def fake_jtalk(arguments, *, input_text=None, **kwargs):
-        frames = 401 + len(calls) * 137
+        frames = 400 + len(calls) * 120
         calls.append({"text": input_text.strip(), "frames": frames})
-        write_wav(Path(arguments[arguments.index("-ow") + 1]), frames=frames)
+        write_wav(Path(arguments[arguments.index("-ow") + 1]), frames=frames, padding=320)
+        write_trace(Path(arguments[arguments.index("-ot") + 1]), [("sil", 320), ("a", frames), ("sil", 320)])
         return ""
 
     with patch.object(audio, "command", side_effect=fake_jtalk):
@@ -100,6 +124,18 @@ createHash('sha256').update(JSON.stringify([a.id,a.title,a.body,
         self.assertTrue(all(len(chunk.encode("utf-8")) <= 300 for chunk in chunks))
         self.assertTrue(all("\n" not in chunk for chunk in chunks))
         self.assertEqual("".join("".join(chunks).split()), "".join(source.split()))
+
+    def test_initial_chunks_keep_formatted_numbers_and_latin_words_intact(self):
+        for token in ("4,239", "1,000", "7.5％", "WACC"):
+            for padding in (98, 99, 100):
+                source = "あ" * padding + token + "の意味を確認します。"
+                with self.subTest(token=token, padding=padding):
+                    chunks = audio.speech_chunks(source)
+                    self.assertEqual("".join(chunks), source)
+                    self.assertTrue(any(token in chunk for chunk in chunks))
+                    self.assertTrue(all(len(chunk.encode()) <= audio.MAX_INPUT_BYTES for chunk in chunks))
+        with self.assertRaises(audio.AudioError):
+            audio.speech_chunks("A" * (audio.MAX_INPUT_BYTES + 1))
 
     def test_segment_keys_use_body_paragraph_indexes_and_keep_public_display_text(self):
         item = article()
@@ -259,6 +295,233 @@ class PcmContractTest(unittest.TestCase):
                 audio.bounded_pcm(paths[0])
 
 
+class TraceAndRepairTest(unittest.TestCase):
+    tools = {"open_jtalk": "fake-jtalk", "dictionary": "unused", "voice": "unused"}
+
+    def test_trace_uses_100ns_ticks_and_frame_period_in_samples(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write_wav(root / "voice.wav", frames=4800, rate=48000, padding=480)
+            write_trace(root / "voice.txt", [("sil", 480), ("a", 4800), ("sil", 480)], rate=48000, period=240)
+            self.assertEqual(audio.read_synthesis_trace(root / "voice.txt", root / "voice.wav"),
+                             [("sil", .01), ("a", .1), ("sil", .01)])
+
+    def test_failed_oversized_or_inconsistent_trace_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            wav, trace = root / "voice.wav", root / "voice.txt"
+            write_wav(wav, frames=400, padding=320)
+            write_trace(trace, [("sil", 320), ("a", 400), ("sil", 320)])
+            valid = trace.read_text()
+            invalid = ["", "[Output label]\nfailed\n", valid.replace("[Global parameter]", "missing"),
+                       valid.replace("8000(Hz)", "48000(Hz)"), valid.replace("5.00000(msec)", "240.00000(msec)"),
+                       valid.replace("40(point)", "0(point)"), valid.replace("HMMs -> 3", "HMMs -> 4"),
+                       valid.replace("400000 900000", "400001 900000"),
+                       valid.replace("900000 1300000", "900000 1300001"),
+                       valid.replace("-a+", "-sil+")]
+            for value in invalid:
+                trace.write_text(value)
+                with self.subTest(trace=value[:80]), self.assertRaises(audio.AudioError):
+                    audio.read_synthesis_trace(trace, wav)
+            trace.write_text(valid)
+            with patch.object(audio, "MAX_TRACE_BYTES", 16), self.assertRaises(audio.AudioError):
+                audio.read_synthesis_trace(trace, wav)
+            with patch.object(audio, "MAX_TRACE_LABELS", 2), self.assertRaises(audio.AudioError):
+                audio.read_synthesis_trace(trace, wav)
+            trace.unlink()
+            with self.assertRaises(audio.AudioError):
+                audio.read_synthesis_trace(trace, wav)
+
+    def test_only_sustained_slow_speech_triggers_repair(self):
+        self.assertEqual(audio.slow_phoneme_run([("a", .25)] * 8), 0)
+        self.assertEqual(audio.slow_phoneme_run([("a", .6), ("i", .1)] * 8), 1)
+        self.assertEqual(audio.slow_phoneme_run([("a", .4)] * 4 + [("pau", 1)] + [("a", .4)] * 4), 4)
+        self.assertEqual(audio.slow_phoneme_run([("sil", 3), ("pau", 2)] * 8), 0)
+        self.assertEqual(audio.slow_phoneme_run([("a", .3)] * 5), 5)
+
+    def test_repair_split_preserves_spaces_numbers_and_latin_words(self):
+        for token in ("4,239", "1,000", "7.5％", "WACC"):
+            source = "あ" * 10 + token + "い" * 10
+            with self.subTest(token=token):
+                left, right = audio.split_slow_chunk(source)
+                self.assertEqual(left + right, source)
+                self.assertTrue(token in left or token in right)
+        source = "longword WACC longword"
+        self.assertEqual("".join(audio.split_slow_chunk(source)), source)
+        with self.assertRaises(audio.AudioError):
+            audio.split_slow_chunk("WACC")
+
+    def test_adaptive_splits_preserve_text_and_keep_each_normal_leaf(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            calls = []
+            def synth(arguments, *, input_text=None, **kwargs):
+                text = input_text.strip()
+                slow = len(text.encode()) > 65
+                calls.append((text, slow))
+                self.assertEqual(arguments[arguments.index("-r") + 1], "1.0")
+                return synthetic_jtalk(arguments, input_text, slow)
+            source = "本文の言葉を変えず、異常な発声時間だけを検知して分割します。正常な部分はそのまま保持します。"
+            with patch.object(audio, "command", side_effect=synth):
+                leaves = audio.synthesize_chunk(source, Path(temporary), self.tools)
+            self.assertEqual("".join(leaf["text"] for leaf in leaves), source)
+            self.assertEqual(len(calls), 2 * len(leaves) - 1)
+            self.assertLessEqual(len(calls), audio.MAX_SYNTHESIS_CALLS)
+            for leaf in leaves:
+                self.assertEqual(calls.count((leaf["text"], False)), 1)
+                self.assertEqual(audio.slow_phoneme_run(leaf["phonemes"]), 0)
+                self.assertEqual(leaf["pcm"], struct.pack("<hh", 5000, -5000) * 200)
+
+    def test_unrepairable_speech_stops_at_size_depth_and_retry_limits(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = "常に異常が続く発声を無限に再試行することはありません。"
+            for name, limit in [("MIN_REPAIR_BYTES", 300), ("MAX_REPAIR_DEPTH", 0), ("MAX_SYNTHESIS_CALLS", 1)]:
+                def synth(arguments, *, input_text=None, **kwargs):
+                    return synthetic_jtalk(arguments, input_text, slow=True)
+                with self.subTest(limit=name), patch.object(audio, name, limit), \
+                        patch.object(audio, "command", side_effect=synth) as command, \
+                        self.assertRaises(audio.AudioError):
+                    audio.synthesize_chunk(source, Path(temporary), self.tools)
+                self.assertEqual(command.call_count, 1)
+
+    def test_all_slow_retries_are_bounded_across_both_branches(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = "分割後にも異常が続く長い本文を使って呼び出し回数の上限を確かめます。" * 2
+            def synth(arguments, *, input_text=None, **kwargs):
+                return synthetic_jtalk(arguments, input_text, slow=len(input_text.strip().encode()) > 40)
+            with patch.object(audio, "MIN_REPAIR_BYTES", 0), \
+                    patch.object(audio, "MAX_REPAIR_DEPTH", 10), \
+                    patch.object(audio, "MAX_SYNTHESIS_CALLS", 5), \
+                    patch.object(audio, "command", side_effect=synth) as command, \
+                    self.assertRaises(audio.AudioError):
+                audio.synthesize_chunk(source, Path(temporary), self.tools)
+            self.assertEqual(command.call_count, 5)
+
+    def test_malformed_or_oversized_slow_pcm_is_rejected_before_retry(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for corruption in ("stereo", "eight-bit", "truncated", "oversized"):
+                def synth(arguments, *, input_text=None, **kwargs):
+                    synthetic_jtalk(arguments, input_text, slow=True)
+                    path = Path(arguments[arguments.index("-ow") + 1])
+                    if corruption == "truncated":
+                        path.write_bytes(path.read_bytes()[:-2])
+                    elif corruption in ("stereo", "eight-bit"):
+                        frames = 12640
+                        channels, width = (2, 2) if corruption == "stereo" else (1, 1)
+                        with wave.open(str(path), "wb") as wav:
+                            wav.setnchannels(channels)
+                            wav.setsampwidth(width)
+                            wav.setframerate(8000)
+                            wav.writeframes(b"\1" * (frames * channels * width))
+                    return ""
+                limit = 1 if corruption == "oversized" else audio.MAX_ARTICLE_SECONDS
+                with self.subTest(corruption=corruption), \
+                        patch.object(audio, "MAX_ARTICLE_SECONDS", limit), \
+                        patch.object(audio, "command", side_effect=synth) as command, \
+                        self.assertRaises(audio.AudioError):
+                    audio.synthesize_chunk("異常な音声は分割しても修復せず直ちに停止します。", root, self.tools)
+                self.assertEqual(command.call_count, 1)
+
+    def test_missing_new_trace_cannot_reuse_an_old_successful_output(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write_wav(root / "chunk.wav", frames=400, padding=320)
+            write_trace(root / "chunk.txt", [("sil", 320), ("a", 400), ("sil", 320)])
+            with patch.object(audio, "command", return_value=""), self.assertRaises(audio.AudioError):
+                audio.synthesize_chunk("正常な本文。", root, self.tools)
+
+    def test_missing_new_wav_cannot_reuse_an_old_successful_output(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write_wav(root / "chunk.wav", frames=400, padding=320)
+            def trace_only(arguments, **kwargs):
+                write_trace(root / "chunk.txt", [("sil", 320), ("a", 400), ("sil", 320)])
+                return ""
+            with patch.object(audio, "command", side_effect=trace_only), self.assertRaises(audio.AudioError):
+                audio.synthesize_chunk("正常な本文。", root, self.tools)
+
+    def test_article_cues_count_only_accepted_pcm_after_repairs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            calls = []
+            def synth(arguments, *, input_text=None, **kwargs):
+                slow = len(input_text.strip().encode()) > 65
+                calls.append(slow)
+                return synthetic_jtalk(arguments, input_text, slow)
+            item = {"id": "2026-11-05-1", "title": "正常な見出し", "body": "長い文章の発声を測ります。" * 8}
+            with patch.object(audio, "command", side_effect=synth):
+                cues = audio.synthesize_article(item, root / "article.wav", self.tools)
+            accepted = calls.count(False)
+            total = (accepted * 400 + round(8000 * audio.LEADING_PAUSE_SECONDS) +
+                     (accepted - 1) * round(8000 * audio.CHUNK_PAUSE_SECONDS) +
+                     round(8000 * audio.TRAILING_PAUSE_SECONDS))
+            self.assertGreater(calls.count(True), 0)
+            self.assertEqual(cues[0]["endFrame"], round(8000 * audio.LEADING_PAUSE_SECONDS) + 400 +
+                             round(8000 * audio.CHUNK_PAUSE_SECONDS))
+            self.assertEqual(cues[1]["startFrame"], cues[0]["endFrame"])
+            self.assertEqual(cues[1]["endFrame"], total)
+            self.assertEqual(cues[1]["text"], item["body"])
+            with wave.open(str(root / "article.wav")) as wav:
+                self.assertEqual(wav.getnframes(), total)
+
+
+class NativeSpeechRepairTest(unittest.TestCase):
+    def setUp(self):
+        try:
+            self.tools = audio.toolchain()
+        except audio.AudioError as exc:
+            self.skipTest(str(exc))
+
+    def baseline(self, text, root):
+        wav, trace = root / "baseline.wav", root / "baseline.txt"
+        audio.command([self.tools["open_jtalk"], "-x", self.tools["dictionary"], "-m", self.tools["voice"],
+                       "-r", "1.0", "-ow", str(wav), "-ot", str(trace)], input_text=text + "\n")
+        phones = audio.read_synthesis_trace(trace, wav)
+        rate, pcm = audio.bounded_pcm(wav, leading_pause=0, trailing_pause=0)
+        return phones, rate, pcm
+
+    def test_minimal_model_regression_and_normal_pcm_preservation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            slow = "国営企業化で2024年1月に発足した事業者です。"
+            normal = "2024年1月に発足した事業者です。"
+            bad_phones, rate, bad_pcm = self.baseline(slow, root)
+            good_phones, good_rate, good_pcm = self.baseline(normal, root)
+            self.assertGreaterEqual(audio.slow_phoneme_run(bad_phones), 5)
+            self.assertEqual(audio.slow_phoneme_run(good_phones), 0)
+            self.assertAlmostEqual(len(bad_pcm) / 2 / rate + .2, 9.318, delta=.15)
+            self.assertAlmostEqual(len(good_pcm) / 2 / good_rate + .2, 3.422, delta=.15)
+            leaves = audio.synthesize_chunk(slow, root, self.tools)
+            self.assertEqual("".join(leaf["text"] for leaf in leaves), slow)
+            self.assertTrue(all(audio.slow_phoneme_run(leaf["phonemes"]) == 0 for leaf in leaves))
+            repaired = sum(len(leaf["pcm"]) / 2 / leaf["rate"] + .2 for leaf in leaves)
+            self.assertLess(repaired, 7)
+            with patch.object(audio, "command", wraps=audio.command) as command:
+                retained = audio.synthesize_chunk(normal, root, self.tools)
+            self.assertEqual(command.call_count, 1)
+            self.assertEqual(len(retained), 1)
+            self.assertEqual(retained[0]["pcm"], good_pcm)
+
+    def test_two_published_slow_paragraphs_are_repaired_without_changing_text(self):
+        fixtures = [
+            ("これは2026年4月1日のJR東日本の公式記事を基にした仕組みの解説です。同社は、電気をつくる段階だけでなく、送る・ためる・使う段階でも効率化を進めています。ここで示す図は利用方法の模式図で、", 30.1765),
+            ("締結は2026年10月28日、発表は11月4日です。台湾で締結式を行い、今後は定期的な意見交換や相互視察を通じて協力を進めます。台鉄公司は、旧台湾鉄路管理局の国営企業化で2024年1月に発足した事業者です。", 28.2465),
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for text, previous in fixtures:
+                with self.subTest(text=text[:30]):
+                    phones, rate, pcm = self.baseline(text, root)
+                    self.assertGreaterEqual(audio.slow_phoneme_run(phones), 5)
+                    self.assertAlmostEqual(len(pcm) / 2 / rate + .2, previous, delta=.15)
+                    leaves = audio.synthesize_chunk(text, root, self.tools)
+                    self.assertEqual("".join(leaf["text"] for leaf in leaves), text)
+                    self.assertTrue(all(audio.slow_phoneme_run(leaf["phonemes"]) == 0 for leaf in leaves))
+                    self.assertTrue(all(max(seconds for phone, seconds in leaf["phonemes"] if phone not in ("sil", "pau"))
+                                        <= .25 for leaf in leaves))
+                    self.assertLess(sum(len(leaf["pcm"]) / 2 / leaf["rate"] + .2 for leaf in leaves), previous * .85)
+
+
 class OpenJtalkLengthTest(unittest.TestCase):
     def test_long_article_is_not_truncated_by_cli_line_or_byte_buffer(self):
         try:
@@ -349,6 +612,21 @@ class Mp3PublicationTest(unittest.TestCase):
                     patch.object(audio, "synthesize_article", side_effect=self.fake_synthesis), \
                     patch.object(audio, "MAX_OUTPUT_BYTES", 1), \
                     self.assertRaises(audio.AudioError):
+                audio.build_audio(root / "dist", root)
+            self.assertEqual({path.name: path.read_bytes() for path in audio_dir.iterdir()}, before)
+
+    def test_unrepairable_speech_preserves_previous_manifest_and_audio(self):
+        tools = {name: shutil.which(name) for name in ["ffmpeg", "ffprobe"]}
+        tools.update(TraceAndRepairTest.tools)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            audio_dir = self.make_project(root)
+            before = {path.name: path.read_bytes() for path in audio_dir.iterdir()}
+            def synth(arguments, *, input_text=None, **kwargs):
+                self.assertEqual(arguments[0], "fake-jtalk", "Failed repair must stop before encoding/publication")
+                return synthetic_jtalk(arguments, input_text, slow=True)
+            with patch.object(audio, "toolchain", return_value=tools), \
+                    patch.object(audio, "command", side_effect=synth), self.assertRaises(audio.AudioError):
                 audio.build_audio(root / "dist", root)
             self.assertEqual({path.name: path.read_bytes() for path in audio_dir.iterdir()}, before)
 

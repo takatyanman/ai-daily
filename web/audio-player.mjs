@@ -155,8 +155,40 @@ export function createAudioReader({audio, articles, duration, startIndex = 0, on
     listeners.push(() => audio.removeEventListener(name, handler));
   };
   const position = () => pendingSeek ?? (Number.isFinite(audio.currentTime) ? audio.currentTime : articles[startIndex].start);
-  const state = () => ({phase, rate, error, position: position(), duration, index: audioChapterAt(articles, position())});
+  const state = () => {
+    const actualRate = Number.isFinite(audio.playbackRate) ? audio.playbackRate : null;
+    return {phase, rate, actualRate, rateUnavailable: actualRate !== rate, error, position: position(), duration, index: audioChapterAt(articles, position())};
+  };
   const emit = () => { if (!disposed) onChange(state()); };
+  let syncingRate = false, rateRepairsLeft = 2;
+  let reportedRate = rate, reportedActualRate = audio.playbackRate;
+  const rejectedRates = new Map();
+  const nativeRateMatches = () => audio.playbackRate === rate &&
+    (audio.defaultPlaybackRate === rate || rejectedRates.get('defaultPlaybackRate') === rate);
+  function reportRate() {
+    if (reportedRate === rate && Object.is(reportedActualRate, audio.playbackRate)) return;
+    reportedRate = rate; reportedActualRate = audio.playbackRate; emit();
+  }
+  function syncRate({rateEvent = false} = {}) {
+    if (disposed || syncingRate) return;
+    if (!rateEvent) { rateRepairsLeft = 2; rejectedRates.clear(); }
+    const properties = ['defaultPlaybackRate', 'playbackRate'].filter(property =>
+      audio[property] !== rate && rejectedRates.get(property) !== rate);
+    if (!properties.length || (rateEvent && rateRepairsLeft <= 0)) { reportRate(); return; }
+    if (rateEvent) rateRepairsLeft -= 1;
+    syncingRate = true;
+    try {
+      for (const property of properties) {
+        try {
+          audio[property] = rate;
+          if (audio[property] !== rate) rejectedRates.set(property, rate);
+        } catch { rejectedRates.set(property, rate); }
+      }
+    } finally { syncingRate = false; }
+    // Some engines clamp or reject a rate. Do not create a ratechange write loop.
+    // A later explicit checkpoint or stable timeupdate allows a fresh recovery.
+    reportRate();
+  }
   function verifyMetadata() {
     if (!Number.isFinite(audio.duration) || Math.abs(audio.duration - duration) > 0.5) invalid('duration-mismatch');
     metadataValid = true;
@@ -191,7 +223,9 @@ export function createAudioReader({audio, articles, duration, startIndex = 0, on
     });
   }
   async function play() {
-    if (disposed || intendedPlaying) return;
+    if (disposed) return;
+    syncRate();
+    if (intendedPlaying) return;
     const retrying = phase === 'error';
     if (phase === 'finished') pendingSeek = articles[startIndex].start;
     const token = ++generation;
@@ -201,7 +235,7 @@ export function createAudioReader({audio, articles, duration, startIndex = 0, on
     try {
       await metadata();
       if (disposed || token !== generation) return;
-      applySeek(); audio.playbackRate = rate;
+      applySeek(); syncRate();
       await audio.play();
       if (disposed || token !== generation) return;
       phase = audio.paused ? 'paused' : 'playing';
@@ -235,23 +269,29 @@ export function createAudioReader({audio, articles, duration, startIndex = 0, on
     seekTo(articles[index].start);
     if (startPlayback) void play();
   }
+  listen('ratechange', () => syncRate({rateEvent: true}));
   listen('loadedmetadata', () => {
+    syncRate();
     try { verifyMetadata(); applySeek(); emit(); } catch (failure) { fail(failure.code || 'seek-error'); }
   });
   listen('playing', () => {
     if (!intendedPlaying) { audio.pause(); return; }
+    syncRate();
     phase = 'playing'; error = null; emit();
   });
   listen('pause', () => {
     if (phase === 'playing' || phase === 'loading') { generation += 1; intendedPlaying = false; phase = 'paused'; emit(); }
   });
   listen('waiting', () => { if (intendedPlaying) { phase = 'loading'; emit(); } });
-  listen('timeupdate', emit);
-  listen('seeked', emit);
+  listen('timeupdate', () => {
+    if (nativeRateMatches()) { rateRepairsLeft = 2; rejectedRates.delete('playbackRate'); }
+    emit();
+  });
+  listen('seeked', () => { syncRate(); emit(); });
   listen('ended', () => { generation += 1; intendedPlaying = false; phase = 'finished'; error = null; emit(); });
   listen('error', () => fail('audio-error'));
   return {
-    state, play, pause, seekTo, select,
+    state, play, pause, seekTo, select, syncRate,
     next() { select(state().index + 1); },
     previous() { select(state().index - 1); },
     restart() { select(state().index); },
@@ -263,7 +303,7 @@ export function createAudioReader({audio, articles, duration, startIndex = 0, on
     setRate(value) {
       const next = Number(value);
       if (!AUDIO_RATES.includes(next)) return;
-      rate = next; audio.playbackRate = next; emit();
+      rate = next; syncRate(); emit();
     },
     dispose() { generation += 1; intendedPlaying = false; disposed = true; audio.pause(); listeners.forEach(remove => remove()); },
   };
@@ -423,6 +463,7 @@ export async function initAudioPlayer(doc = globalThis.document, win = globalThi
     if (state.phase === 'paused') message = state.error ? audioErrorMessage(state.error) : '一時停止中。「再開」で同じ位置から聴けます。';
     if (state.phase === 'finished') message = 'この日の最後の記事まで再生しました。';
     if (state.phase === 'error') message = audioErrorMessage(state.error);
+    if (state.rateUnavailable) message += state.actualRate === null ? ' 再生速度を確認できません。速度を選び直してください。' : ` 設定は${state.rate}倍速ですが、実際の再生速度は${state.actualRate}倍速です。速度を選び直してください。`;
     if (message !== lastStatus) { status.textContent = message; lastStatus = message; }
     if (state.index !== lastIndex) {
       if (current) current.textContent = `${state.index + 1} / 3　${article.title}`;
@@ -454,10 +495,12 @@ export async function initAudioPlayer(doc = globalThis.document, win = globalThi
   listen(locate, 'click', () => syncReading(reader.state(), true));
   listen(doc, 'visibilitychange', () => {
     if (doc.visibilityState === 'hidden') return;
+    reader.syncRate();
     // Hidden timeupdates can advance the cue without moving the visible page.
     lastReadingId = null; lastCueKey = null; lastReadingPhase = null;
     update(reader.state());
   });
+  listen(win, 'pageshow', () => reader.syncRate());
   listen(speed, 'change', () => {
     reader.setRate(speed.value);
     try { win.localStorage.setItem('ai-daily-speech-rate', String(reader.state().rate)); } catch { /* Optional preference. */ }

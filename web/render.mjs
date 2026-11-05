@@ -10,7 +10,7 @@ const escapeHtml = (value) => String(value ?? '')
 
 const escapeAttribute = escapeHtml;
 // Change with the audio UI so newly rendered pages bypass older browser assets.
-const AUDIO_UI_REVISION = '20261104-sync';
+const AUDIO_UI_REVISION = '20261106-speechfix';
 
 function absolute(path, baseUrl) {
   return new URL(path, baseUrl).href;

@@ -38,10 +38,10 @@ test('audio manifest binds the requested article to its text and confines media 
 });
 
 class FakeAudio extends EventTarget{
- constructor(){super();this.duration=30;this.readyState=1;this.currentTime=0;this.playbackRate=1;this.paused=true;this.playCalls=0;this.src='same-daily-file.mp3';}
+ constructor(){super();this.duration=30;this.readyState=1;this.currentTime=0;this.defaultPlaybackRate=1;this.playbackRate=1;this.paused=true;this.playCalls=0;this.src='same-daily-file.mp3';}
  play(){this.playCalls++;if(this.rejectPlay)return Promise.reject(this.rejectPlay);this.paused=false;this.dispatchEvent(new Event('playing'));return Promise.resolve();}
  pause(){if(!this.paused){this.paused=true;this.dispatchEvent(new Event('pause'));}}
- load(){}
+ load(){this.playbackRate=this.defaultPlaybackRate;}
  tick(value){this.currentTime=value;this.dispatchEvent(new Event('timeupdate'));}
 }
 function fixture(startIndex=0){const audio=new FakeAudio();const reader=createAudioReader({audio,articles:chapters,duration:30,startIndex});return{reader,audio};}
@@ -63,6 +63,83 @@ test('audio speeds include three times and chapter controls preserve playback',a
  const {reader,audio}=fixture();await reader.play();reader.setRate(3);assert.equal(audio.playbackRate,3);reader.setRate(99);assert.equal(reader.state().rate,3);
  assert.equal(AUDIO_RATES.at(-1),3);reader.next();assert.equal(audio.currentTime,10);assert.equal(audio.playCalls,1);
  reader.previous();assert.equal(audio.currentTime,0);reader.pause();assert.equal(reader.state().phase,'paused');await reader.play();assert.equal(audio.playCalls,2);reader.dispose();
+});
+
+test('the selected speed survives native load and an external reset during playback',async()=>{
+ const {reader,audio}=fixture(1);reader.setRate(3);
+ assert.equal(audio.defaultPlaybackRate,3);audio.load();assert.equal(audio.playbackRate,3);
+ await reader.play();audio.tick(14);const source=audio.src,playCalls=audio.playCalls;
+ for(const event of ['ratechange','loadedmetadata','playing','seeked']){
+  audio.defaultPlaybackRate=1;audio.playbackRate=1;audio.dispatchEvent(new Event(event));
+  assert.equal(audio.defaultPlaybackRate,3,event);assert.equal(audio.playbackRate,3,event);
+  assert.equal(reader.state().rate,3);assert.equal(reader.state().phase,'playing');assert.equal(reader.state().index,1);
+  assert.equal(audio.currentTime,14);assert.equal(audio.playCalls,playCalls);assert.equal(audio.src,source);
+ }
+ audio.playbackRate=1;await reader.play();assert.equal(audio.playbackRate,3);assert.equal(audio.playCalls,playCalls,'already playing must only repair the rate');
+ audio.tick(15);audio.playbackRate=1;audio.dispatchEvent(new Event('ratechange'));assert.equal(audio.playbackRate,3,'a later independent reset is repaired again');
+ reader.dispose();audio.playbackRate=1;audio.dispatchEvent(new Event('ratechange'));assert.equal(audio.playbackRate,1,'disposed listeners cannot modify the media');
+});
+
+test('a visibility or page-restoration checkpoint repairs speed without playing or seeking',async()=>{
+ const {reader,audio}=fixture(1);reader.setRate(2.5);
+ for(const phase of ['idle','paused','error']){
+  if(phase==='paused'){await reader.play();audio.tick(14);reader.pause();}
+  if(phase==='error')audio.dispatchEvent(new Event('error'));
+  const before=reader.state(),playCalls=audio.playCalls,source=audio.src;
+  audio.defaultPlaybackRate=1;audio.playbackRate=1;reader.syncRate();
+  assert.equal(audio.defaultPlaybackRate,2.5);assert.equal(audio.playbackRate,2.5);
+  assert.deepEqual(reader.state(),before);assert.equal(audio.playCalls,playCalls);assert.equal(audio.src,source);
+ }
+ reader.dispose();
+});
+
+test('an exhausted correction burst reports the actual speed and clears after recovery',async()=>{
+ const audio=new FakeAudio(),changes=[];
+ const reader=createAudioReader({audio,articles:chapters,duration:30,startIndex:1,onChange:state=>changes.push(state)});
+ reader.setRate(3);await reader.play();audio.tick(14);
+ const playCalls=audio.playCalls,source=audio.src;
+ for(let i=0;i<3;i++){audio.playbackRate=1;audio.dispatchEvent(new Event('ratechange'));}
+ assert.equal(reader.state().rate,3);assert.equal(reader.state().actualRate,1);assert.equal(reader.state().rateUnavailable,true);
+ assert.equal(changes.at(-1).actualRate,1,'the UI receives the mismatch even before another timeupdate');
+ assert.equal(reader.state().phase,'playing');assert.equal(reader.state().position,14);assert.equal(audio.playCalls,playCalls);assert.equal(audio.src,source);
+ reader.syncRate();assert.equal(reader.state().actualRate,3);assert.equal(reader.state().rateUnavailable,false);assert.equal(changes.at(-1).rateUnavailable,false);
+ audio.playbackRate=NaN;assert.equal(reader.state().actualRate,null);assert.equal(reader.state().rateUnavailable,true);
+ reader.syncRate();assert.equal(reader.state().actualRate,3);assert.equal(reader.state().rateUnavailable,false);reader.dispose();
+});
+
+test('a rejected default speed does not hide a working current speed or exhaust future repairs',()=>{
+ const audio=new FakeAudio();Object.defineProperty(audio,'defaultPlaybackRate',{get:()=>1,set(){throw new DOMException('unsupported','NotSupportedError');}});
+ const reader=createAudioReader({audio,articles:chapters,duration:30});reader.setRate(3);
+ assert.equal(reader.state().actualRate,3);assert.equal(reader.state().rateUnavailable,false);
+ for(let i=0;i<4;i++){
+  audio.tick(i+1);audio.playbackRate=1;audio.dispatchEvent(new Event('ratechange'));
+  assert.equal(reader.state().actualRate,3);assert.equal(reader.state().rateUnavailable,false);
+ }
+ reader.dispose();
+});
+
+test('rate repair tolerates rejected or synchronously clamped native setters without recursion',()=>{
+ const audio=new FakeAudio();let current=1,defaultWrites=0,currentWrites=0;
+ Object.defineProperty(audio,'defaultPlaybackRate',{get:()=>1,set(){defaultWrites++;throw new DOMException('unsupported','NotSupportedError');}});
+ Object.defineProperty(audio,'playbackRate',{get:()=>current,set(value){currentWrites++;current=Math.min(2,value);audio.dispatchEvent(new Event('ratechange'));}});
+ const reader=createAudioReader({audio,articles:chapters,duration:30});
+ assert.doesNotThrow(()=>reader.setRate(3));assert.equal(current,2);assert.equal(defaultWrites,1);assert.equal(currentWrites,1);assert.equal(reader.state().rateUnavailable,true);
+ for(let i=0;i<20;i++)audio.dispatchEvent(new Event('ratechange'));
+ assert.equal(defaultWrites,1);assert.equal(currentWrites,1);assert.equal(reader.state().phase,'idle');
+ reader.setRate(1.5);assert.equal(current,1.5,'an unsupported default cannot prevent a supported current speed');reader.dispose();
+});
+
+test('asynchronous rate clamping cannot create an endless ratechange correction chain',async()=>{
+ const audio=new FakeAudio();let current=1,writes=0;
+ Object.defineProperty(audio,'playbackRate',{get:()=>current,set(value){
+  writes++;current=value;
+  if(value>2)queueMicrotask(()=>{current=2;audio.dispatchEvent(new Event('ratechange'));});
+ }});
+ const reader=createAudioReader({audio,articles:chapters,duration:30});reader.setRate(3);
+ await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(writes,3,'one requested write plus two bounded corrections');assert.equal(current,2);assert.equal(reader.state().actualRate,2);assert.equal(reader.state().rateUnavailable,true);
+ audio.dispatchEvent(new Event('ratechange'));assert.equal(writes,3);assert.equal(reader.state().phase,'idle');assert.equal(audio.playCalls,0);
+ reader.setRate(1.5);assert.equal(current,1.5);assert.equal(reader.state().rateUnavailable,false);reader.dispose();
 });
 
 test('playback denial stays paused for a user gesture and a failed file can be retried',async()=>{

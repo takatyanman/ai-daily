@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import array
+from contextlib import ExitStack
 import datetime as dt
 import hashlib
 import json
@@ -28,6 +29,14 @@ MAX_DAYS = 14
 MAX_OUTPUT_BYTES = 64 * 1024 * 1024
 MAX_ARTICLE_SECONDS = 1800
 MAX_INPUT_BYTES = 300
+MAX_TRACE_BYTES = 16 * 1024 * 1024
+MAX_TRACE_LABELS = 4096
+TRACE_TICKS_PER_SECOND = 10_000_000
+SLOW_PHONEME_SECONDS = 0.25
+SLOW_PHONEME_RUN = 5
+MIN_REPAIR_BYTES = 30
+MAX_REPAIR_DEPTH = 6
+MAX_SYNTHESIS_CALLS = 31
 CHUNK_PAUSE_SECONDS = 0.20
 LEADING_PAUSE_SECONDS = 0.12
 TRAILING_PAUSE_SECONDS = 0.85
@@ -41,6 +50,9 @@ VOICE = {
 DAY_FILE = re.compile(r"\d{4}-\d{2}-\d{2}\.json\Z")
 MP3_FILE = re.compile(r"\d{4}-\d{2}-\d{2}-[a-f0-9]{12}\.mp3\Z")
 URL = re.compile(r"https?://[^\s<>「」『』（）()、。]+", re.IGNORECASE)
+# Keep Latin words and formatted numbers intact across both kinds of splitting.
+# A comma/decimal point between digits belongs to the token, as does its percent.
+SPEECH_TOKEN = re.compile(r"[A-Za-z0-9_]+(?:[.,:/+\-][A-Za-z0-9_]+)*(?:[%％])?")
 
 
 class AudioError(ValueError):
@@ -162,23 +174,33 @@ def speech_text(article: dict) -> str:
     return " ".join(segment["spoken"] for segment in speech_segments(article)) + "\n"
 
 
+def safe_split_offsets(text: str) -> list[tuple[int, int]]:
+    """Return character/UTF-8 boundaries outside words and formatted numbers."""
+    protected = {index for token in SPEECH_TOKEN.finditer(text)
+                 for index in range(token.start() + 1, token.end())}
+    offsets = []
+    cursor = 0
+    for index, char in enumerate(text, 1):
+        cursor += len(char.encode("utf-8"))
+        if index not in protected:
+            offsets.append((index, cursor))
+    return offsets
+
+
 def speech_chunks(text: str) -> list[str]:
     """Stay below the CLI's byte buffer, preferring sentence/phrase boundaries."""
     remaining = re.sub(r"\s+", " ", text).strip()
     chunks = []
     while remaining:
-        byte_count = 0
-        end = 0
-        for char in remaining:
-            size = len(char.encode("utf-8"))
-            if byte_count + size > MAX_INPUT_BYTES:
-                break
-            byte_count += size
-            end += 1
+        offsets = [(index, size) for index, size in safe_split_offsets(remaining)
+                   if size <= MAX_INPUT_BYTES]
+        if not offsets:
+            raise AudioError("A speech token exceeds the Open JTalk input byte limit")
+        end = offsets[-1][0]
         if end < len(remaining):
             # Retain punctuation and all content, even in unusually long sentences.
-            boundaries = [index + 1 for index, char in enumerate(remaining[:end])
-                          if char in "。！？!?、，, "]
+            boundaries = [index for index, _ in offsets
+                          if remaining[index - 1] in "。！？!?、，, "]
             if boundaries and boundaries[-1] >= end // 3:
                 end = boundaries[-1]
         chunk = remaining[:end].strip()
@@ -215,40 +237,150 @@ def toolchain() -> dict[str, str]:
     return paths
 
 
+def read_synthesis_trace(path: Path, wav: Path) -> list[tuple[str, float]]:
+    """Read HTS's 100 ns labels and verify their clock against the native WAV.
+
+    Nitech uses 48,000 samples/s and 240 samples/frame (5 ms), not 240 ms.
+    The trace supplies both values so a changed or malformed clock fails closed.
+    """
+    if (path.is_symlink() or not path.is_file() or
+            not 0 < path.stat().st_size <= MAX_TRACE_BYTES):
+        raise AudioError("Missing or oversized Open JTalk synthesis trace")
+    try:
+        trace = path.read_text(encoding="utf-8")
+        global_block = trace.split("[Global parameter]\n", 1)[1].split("\n\n", 1)[0]
+        rate = int(re.search(r"(?:Sampling|Sampring) frequency\s+->\s+(\d+)\(Hz\)", global_block)[1])
+        period = int(re.search(r"Frame period\s+->\s+(\d+)\(point\)", global_block)[1])
+        milliseconds = float(re.search(r"([0-9.]+)\(msec\)", global_block)[1])
+        labels = trace.split("[Output label]\n", 1)[1].split("\n\n", 1)[0].splitlines()
+        hmm_count = int(re.search(r"Number of HMMs\s+->\s+(\d+)", trace)[1])
+        with wave.open(str(wav), "rb") as source:
+            wav_rate, wav_frames = source.getframerate(), source.getnframes()
+    except (IndexError, TypeError, ValueError, UnicodeError, OSError, wave.Error, EOFError) as exc:
+        raise AudioError("Invalid Open JTalk synthesis trace") from exc
+    if (not 8000 <= rate <= 96000 or rate != wav_rate or
+            not 0.001 <= period / rate <= 0.02 or
+            not math.isclose(milliseconds, 1000 * period / rate, abs_tol=0.00001) or
+            not 0 < len(labels) == hmm_count <= MAX_TRACE_LABELS):
+        raise AudioError("Open JTalk trace has an invalid sample/frame clock or label count")
+    phonemes = []
+    previous = 0
+    for line in labels:
+        match = re.fullmatch(r"(\d+) (\d+) ([^\s]+)", line)
+        if not match:
+            raise AudioError("Invalid Open JTalk phoneme label")
+        start, end = int(match[1]), int(match[2])
+        phone = re.match(r"[^\s^]+\^[^\s-]+-([A-Za-z]+)\+[^\s]+", match[3])
+        if (not phone or start != previous or end <= start or
+                (end - start) * rate % (period * TRACE_TICKS_PER_SECOND)):
+            raise AudioError("Invalid Open JTalk phoneme boundary")
+        phonemes.append((phone[1], (end - start) / TRACE_TICKS_PER_SECOND))
+        previous = end
+    if (previous * rate != wav_frames * TRACE_TICKS_PER_SECOND or
+            not any(phone not in ("sil", "pau") for phone, _ in phonemes)):
+        raise AudioError("Open JTalk trace does not cover its synthesized WAV")
+    return phonemes
+
+
+def slow_phoneme_run(phonemes: list[tuple[str, float]]) -> int:
+    """Ignore real pauses and isolated long vowels; detect sustained stretching."""
+    run = maximum = 0
+    for phone, seconds in phonemes:
+        run = run + 1 if phone not in ("sil", "pau") and seconds > SLOW_PHONEME_SECONDS else 0
+        maximum = max(maximum, run)
+    return maximum
+
+
+def split_slow_chunk(text: str) -> tuple[str, str]:
+    """Split near half the UTF-8 bytes without changing text or splitting tokens."""
+    total = len(text.encode("utf-8"))
+    offsets = [(index, size) for index, size in safe_split_offsets(text)
+               if index < len(text) and text[:index].strip() and text[index:].strip()]
+    if not offsets:
+        raise AudioError("Abnormally slow speech cannot be split further")
+    for separators, low, high in (("。！？!?、，,；;：:", 0.30, 0.70),
+                                  ("はがをにでとのもへや", 0.25, 0.75)):
+        candidates = [(index, offset) for index, offset in offsets
+                      if low * total <= offset <= high * total and text[index - 1] in separators]
+        if candidates:
+            cut = min(candidates, key=lambda item: abs(item[1] - total / 2))[0]
+            break
+    else:
+        cut = min(offsets, key=lambda item: abs(item[1] - total / 2))[0]
+    return text[:cut], text[cut:]
+
+
+def synthesize_chunk(text: str, temporary: Path, tools: dict[str, str]) -> list[dict]:
+    """Retain normal PCM; repair only verified slow chunks with bounded retries."""
+    if not text.strip() or "\n" in text or "\r" in text or len(text.encode("utf-8")) > MAX_INPUT_BYTES:
+        raise AudioError("Open JTalk synthesis chunk must be a bounded nonempty input line")
+    wav, trace = temporary / "chunk.wav", temporary / "chunk.txt"
+    calls = 0
+
+    def synthesize(part: str, depth: int) -> list[dict]:
+        nonlocal calls
+        if calls >= MAX_SYNTHESIS_CALLS:
+            raise AudioError("Abnormally slow speech exceeded the bounded synthesis retry limit")
+        calls += 1
+        # A successful process that omitted an output must not reuse stale data.
+        wav.unlink(missing_ok=True)
+        trace.unlink(missing_ok=True)
+        command([tools["open_jtalk"], "-x", tools["dictionary"], "-m", tools["voice"],
+                 "-r", "1.0", "-ow", str(wav), "-ot", str(trace)], input_text=part + "\n")
+        phonemes = read_synthesis_trace(trace, wav)
+        # Reject malformed PCM even when its labels would request a retry.
+        rate, pcm = bounded_pcm(wav, leading_pause=0, trailing_pause=0)
+        if slow_phoneme_run(phonemes) < SLOW_PHONEME_RUN:
+            return [{"text": part, "rate": rate, "pcm": pcm, "phonemes": phonemes}]
+        if len(part.encode("utf-8")) <= MIN_REPAIR_BYTES or depth >= MAX_REPAIR_DEPTH:
+            raise AudioError("Abnormally slow speech remains at the bounded minimum chunk size/depth")
+        left, right = split_slow_chunk(part)
+        return synthesize(left, depth + 1) + synthesize(right, depth + 1)
+
+    return synthesize(text, 0)
+
+
 def synthesize_article(article: dict, output: Path, tools: dict[str, str]) -> list[dict]:
     # Preserve the voice's native sample rate/frame period; ffmpeg resamples later.
     # Its CLI reads one line and truncates beyond its input buffer. Merge short
     # utterances into one article PCM, never independently encoded MP3 fragments.
     with tempfile.TemporaryDirectory(prefix="jtalk-article-") as temporary:
-        chunk_wav = Path(temporary) / "chunk.wav"
+        temporary = Path(temporary)
         rate = None
         cursor = 0
         cues = []
         segments = speech_segments(article)
         if not segments:
             raise AudioError("Article has no speakable text")
-        with wave.open(str(output), "wb") as joined:
-            joined.setnchannels(1)
-            joined.setsampwidth(2)
+        # Open the writer only after the first accepted PCM supplies its rate.
+        # Otherwise wave.close() masks an early synthesis failure with a header error.
+        with ExitStack() as stack:
             for index, segment in enumerate(segments):
                 start = cursor
                 # Never combine separate visual units into a synthesis chunk: a
                 # paragraph boundary must come from PCM, not a text-length ratio.
                 chunks = speech_chunks(segment["spoken"])
                 for chunk_index, chunk in enumerate(chunks):
-                    command([tools["open_jtalk"], "-x", tools["dictionary"], "-m", tools["voice"],
-                             "-r", "1.0", "-ow", str(chunk_wav)], input_text=chunk + "\n")
-                    last = index == len(segments) - 1 and chunk_index == len(chunks) - 1
-                    sample_rate, pcm = bounded_pcm(
-                        chunk_wav, leading_pause=LEADING_PAUSE_SECONDS if cursor == 0 else 0,
-                        trailing_pause=TRAILING_PAUSE_SECONDS if last else CHUNK_PAUSE_SECONDS)
-                    if rate is None:
-                        rate = sample_rate
-                        joined.setframerate(rate)
-                    elif rate != sample_rate:
-                        raise AudioError("Synthesized utterance sample rates differ")
-                    joined.writeframesraw(pcm)
-                    cursor += len(pcm) // 2
+                    leaves = synthesize_chunk(chunk, temporary, tools)
+                    for leaf_index, leaf in enumerate(leaves):
+                        sample_rate, pcm = leaf["rate"], leaf["pcm"]
+                        last = (index == len(segments) - 1 and chunk_index == len(chunks) - 1 and
+                                leaf_index == len(leaves) - 1)
+                        lead = round(sample_rate * LEADING_PAUSE_SECONDS) if cursor == 0 else 0
+                        tail = round(sample_rate * (TRAILING_PAUSE_SECONDS if last else CHUNK_PAUSE_SECONDS))
+                        pcm = b"\0\0" * lead + pcm + b"\0\0" * tail
+                        if rate is None:
+                            rate = sample_rate
+                            joined = stack.enter_context(wave.open(str(output), "wb"))
+                            joined.setnchannels(1)
+                            joined.setsampwidth(2)
+                            joined.setframerate(rate)
+                        elif rate != sample_rate:
+                            raise AudioError("Synthesized utterance sample rates differ")
+                        if cursor + len(pcm) // 2 > rate * MAX_ARTICLE_SECONDS:
+                            raise AudioError("Synthesized article exceeds the PCM duration limit")
+                        joined.writeframesraw(pcm)
+                        cursor += len(pcm) // 2
                 cues.append({"key": segment["key"], "text": segment["text"],
                              "startFrame": start, "endFrame": cursor})
         return cues
