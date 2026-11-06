@@ -1,11 +1,35 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {AUDIO_RATES,validateAudioManifest,createAudioReader,audioChapterAt,formatAudioTime,validateAudioArticleViews,matchingAudioCues,audioCueAt} from '../web/audio-player.mjs';
+import {AUDIO_RATES,validateAudioManifest,createAudioReader,audioChapterAt,formatAudioTime,validateAudioArticleViews,matchingAudioCues,audioCueAt,audioFigureIndex,audioListeningState} from '../web/audio-player.mjs';
 
 const date='2026-11-03',hash='a'.repeat(64);
 const chapters=[0,1,2].map(i=>({id:`${date}-${i+1}`,title:`記事${i+1}`,start:i*10,end:(i+1)*10,articleHash:'b'.repeat(64)}));
 const context={manifestUrl:'https://takatyanman.github.io/ai-daily/audio/index.json',pageUrl:`https://takatyanman.github.io/ai-daily/articles/${date}-2.html`,articleId:chapters[1].id,articleTitle:chapters[1].title,articleHash:chapters[1].articleHash};
 function manifest(){return{version:1,voice:{name:'HTS voice',credit:'NIT/TIT',licenseTitle:'CC BY 3.0',licenseUrl:'https://creativecommons.org/licenses/by/3.0/',sourceUrl:'https://example.test/copyright'},days:{[date]:{url:`${date}-${hash.slice(0,12)}.mp3`,duration:30,sha256:hash,articles:structuredClone(chapters)}}};}
+
+test('listening figures follow associated paragraphs and allow explicit choices or text only',()=>{
+ const figures=[{afterParagraph:1},{afterParagraph:4}];
+ for(const cue of ['title','paragraph-0','paragraph-1','paragraph-3']) assert.equal(audioFigureIndex(figures,cue),0,cue);
+ for(const cue of ['paragraph-4','section-5','action-heading','action']) assert.equal(audioFigureIndex(figures,cue),1,cue);
+ assert.equal(audioFigureIndex(figures,'paragraph-5',0),0,'a manual choice survives later cues');
+ assert.equal(audioFigureIndex(figures,'title',1),1,'the other figure can be inspected before it is narrated');
+ assert.equal(audioFigureIndex(figures,'paragraph-5','none'),-1);
+ assert.equal(audioFigureIndex([],'paragraph-5'),-1);
+ assert.equal(audioFigureIndex([{afterParagraph:0}],'paragraph-5'),0,'a generic story diagram remains available');
+ assert.equal(audioFigureIndex(figures,'title',9),0,'a stale manual index falls back to automatic selection');
+});
+
+test('the listening view preserves pause and manual exit until stop, finish, or failure',()=>{
+ let state=audioListeningState({active:false,dismissed:false},'loading'); assert.equal(state.active,true);
+ state=audioListeningState(state,'playing'); state=audioListeningState(state,'paused'); assert.equal(state.active,true);
+ state=audioListeningState(state,'playing','close'); assert.deepEqual(state,{active:false,dismissed:true});
+ for(const phase of ['playing','paused','loading','playing']) {state=audioListeningState(state,phase);assert.equal(state.active,false,phase);}
+ state=audioListeningState(state,'paused','open'); assert.deepEqual(state,{active:true,dismissed:false});
+ for(const terminal of ['idle','finished','error']) {
+  state=audioListeningState({active:true,dismissed:false},terminal);assert.deepEqual(state,{active:false,dismissed:false});
+  assert.equal(audioListeningState(state,'playing').active,true,'the next playback session opens normally');
+ }
+});
 
 test('all three article views must match before switching text during playback',()=>{
  const views=chapters.map(article=>({id:article.id,title:article.title,articleHash:article.articleHash,url:new URL(`${article.id}.html`,context.pageUrl).href}));
