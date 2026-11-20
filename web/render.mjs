@@ -122,6 +122,21 @@ function hasSourceFigures(article, count) {
     Number.isInteger(figure?.after) && figure.after >= 0 && figure.after < count && renderSourceFigures(article, figure.after));
 }
 
+/** Preview only a figure that is also eligible to appear with the article's explanation. */
+function indexFigure(article) {
+  const count = String(article?.body || '').trim().split(/\r?\n\s*\r?\n/).filter(Boolean).length;
+  const figures = Array.isArray(article?.reading?.figures) ? article.reading.figures.slice(0, 2) : [];
+  return figures.find(figure => Number.isInteger(figure?.after) && figure.after >= 0 && figure.after < count &&
+    ['alt', 'caption', 'sourceTitle', 'sourceUrl', 'credit', 'commentary'].every(key => typeof figure[key] === 'string' && figure[key].trim()) &&
+    renderSourceFigures({ ...article, reading: { ...article.reading, figures: [figure] } }, figure.after)) || null;
+}
+
+function indexVisual(article, baseUrl, figure) {
+  const href = escapeAttribute(articleUrl(article, baseUrl));
+  if (figure) return `<a class="card-visual" href="${href}" tabindex="-1" aria-hidden="true" title="${escapeAttribute(`${figure.caption} ${figure.credit}`)}"><img data-article-preview="figure" src="${escapeAttribute(figureImageUrl(figure.url))}" alt="${escapeAttribute(figure.alt)}" width="480" height="360" style="display:block;width:100%;height:auto;aspect-ratio:4/3;object-fit:contain" loading="lazy" decoding="async" referrerpolicy="no-referrer"></a>`;
+  return hasDiagram(article) ? `<a class="card-visual" href="${href}" tabindex="-1" aria-hidden="true">${renderArticleThumbnailSvg(article)}</a>` : '';
+}
+
 function metadata(article, { showTime = false } = {}) {
   const kind = article.kind || 'ニュース';
   return `<div class="article-meta">
@@ -271,20 +286,23 @@ export function renderIndex({ title = 'あなたの朝の3本', baseUrl, article
     <section class="article-list-section" aria-labelledby="articles-title">
       <div class="section-heading"><h2 id="articles-title">届いた記事</h2><span>${escapeHtml(entries.length)} ARTICLES</span></div>
       ${entries.length ? `<ol class="article-list">
-${entries.map((article, index) => `        <li class="article-card">
+${entries.map((article, index) => {
+  const figure = indexFigure(article);
+  return `        <li class="article-card">
           <span class="article-number" aria-hidden="true">${escapeHtml(String(index + 1).padStart(2, '0'))}</span>
           <article class="card-content">
             ${metadata(article)}
-            <div class="card-content-main${hasDiagram(article) ? ' has-visual' : ''}">
+            <div class="card-content-main${figure || hasDiagram(article) ? ' has-visual' : ''}">
               <div class="card-text">
                 <h3><a href="${escapeAttribute(articleUrl(article, baseUrl))}">${escapeHtml(article.title)}</a></h3>
                 ${article.reading?.hook || article.summary ? `<p class="article-summary">${escapeHtml(article.reading?.hook || article.summary)}</p>` : ''}
                 <a class="read-link" href="${escapeAttribute(articleUrl(article, baseUrl))}" aria-label="${escapeAttribute(`${article.title}の本文を読む`)}">約${readingMinutes(article)}分で読む<span aria-hidden="true">↗</span></a>
               </div>
-              ${hasDiagram(article) ? `<a class="card-visual" href="${escapeAttribute(articleUrl(article, baseUrl))}" tabindex="-1" aria-hidden="true">${renderArticleThumbnailSvg(article)}</a>` : ''}
+              ${indexVisual(article, baseUrl, figure)}
             </div>
           </article>
-        </li>`).join('\n')}
+        </li>`;
+}).join('\n')}
       </ol>` : '<div class="empty-state"><h3>次の朝の便りをお待ちください</h3><p>記事が届くと、ここから本文を読めます。</p></div>'}
     </section>`;
   return document({

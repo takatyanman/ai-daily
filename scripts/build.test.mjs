@@ -209,6 +209,50 @@ function quotedDay(){
  return copy;
 }
 
+test('index cards preview the article figure and link to its full explanation',()=>{
+ const copy=quotedDay(),article=copy.articles[0],before=structuredClone(copy);
+ const html=renderIndex({...context,articles:copy.articles});
+ const card=html.match(/<li class="article-card">[\s\S]*?<\/li>/)[0];
+ assert.ok(card.includes('data-article-preview="figure"'));
+ assert.ok(card.includes('src="https://prcdn.freetls.fastly.net/release_image/17557/example.png?width=640&amp;quality=80"'));
+ assert.ok(card.includes(`href="${context.baseUrl}articles/${article.id}.html"`));
+ assert.ok(card.includes('object-fit:contain')&&card.includes('referrerpolicy="no-referrer"'));
+ assert.ok(!card.includes('<svg'));
+ const cards=html.match(/<li class="article-card">[\s\S]*?<\/li>/g);
+ for(const fallback of cards.slice(1))assert.ok(fallback.includes('<svg'),'articles without a figure retain their existing preview');
+ assert.deepEqual(copy,before,'a preview must not rewrite published article data');
+});
+
+test('index previews cannot use uncited, unattributed, out-of-context or unsafe figures',()=>{
+ for(const change of [
+  f=>f.url='javascript:alert(1)',
+  f=>f.url='https://jreast.co.jp.evil.test/image.jpg',
+  f=>f.sourceUrl='https://unlisted.test/source',
+  f=>f.credit=' ',
+  f=>f.commentary='',
+  f=>f.after=999,
+  f=>{f.usage='licensed';delete f.licenseTitle;delete f.licenseUrl;},
+ ]){
+  const article=quotedDay().articles[0];change(article.reading.figures[0]);
+  const html=renderIndex({...context,articles:[article]});
+  assert.ok(!html.includes('data-article-preview="figure"'));
+  assert.ok(html.includes('<svg'));
+ }
+ const article=quotedDay().articles[0],valid=structuredClone(article.reading.figures[0]);
+ article.reading.figures=[{...valid,after:999},valid];
+ assert.ok(renderIndex({...context,articles:[article]}).includes('data-article-preview="figure"'));
+ article.reading.figures=[{...valid,after:999},{...valid,credit:''},valid];
+ assert.ok(!renderIndex({...context,articles:[article]}).includes('data-article-preview="figure"'));
+});
+
+test('figure preview attribution is escaped rather than interpreted as markup',()=>{
+ const article=quotedDay().articles[0];
+ article.reading.figures[0].caption='資料 " onload="bad() <script> &';
+ const html=renderIndex({...context,articles:[article]});
+ assert.ok(html.includes('資料 &quot; onload=&quot;bad() &lt;script&gt; &amp;'));
+ assert.ok(!html.includes(' onload="bad()')&&!html.includes('<script> &'));
+});
+
 test('a cited figure stays with its body context in HTML and RSS without replacing the PNG thumbnail',()=>{
  const copy=quotedDay(),a=copy.articles[0];assert.equal(validateDay(copy).length,3);
  const html=renderArticle({...context,article:a}),rss=renderFeed({...context,articles:copy.articles});
