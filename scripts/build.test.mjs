@@ -3,14 +3,29 @@ import assert from 'node:assert/strict';
 import {readFile,writeFile,mkdir,mkdtemp,rm,symlink} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
-import {validateDay,renderFeed,buildSite} from './build.mjs';
-import {renderArticle} from '../web/render.mjs';
+import {createHash} from 'node:crypto';
+import {validateDay,validateRelatedArticles,renderFeed,buildSite} from './build.mjs';
+import {renderArticle,renderIndex,articleAudioHash} from '../web/render.mjs';
 import {renderIllustrationSvg,renderArticleThumbnailSvg} from '../web/illustrations.mjs';
 import {createSpeechReader,splitForSpeech} from '../web/speech.mjs';
 import './audio-player.test.mjs';
 const day=JSON.parse(await readFile(new URL('../content/2026-10-25.json',import.meta.url),'utf8'));
 const context={title:'朝の3本',baseUrl:'https://example.test/ai-daily/',articles:day.articles};
 const withoutTemplates=html=>html.replace(/<template\b[^>]*>[\s\S]*?<\/template>/g,'');
+function syntheticDay(date){
+ return {date,articles:[1,2,3].map(number=>({
+  id:`${date}-${number}`,title:`検証用の記事${number}`,category:'事業創造',summary:'表示を確かめるための検証記事です。',
+  body:'検証用の第一段落です。\n\n検証用の第二段落です。\n\n以前の検証記事では、試作後の反応を判断に使うと整理しました。今回は集めた反応を次の試作条件に変える点を確かめます。',
+  publishedAt:`${date}T02:00:00+09:00`,kind:'解説',sources:[{title:'検証用の一次資料',url:'https://example.test/primary-source'}],
+  reading:{hook:'検証用の導入です。',takeaways:['第一の要点です。','第二の要点です。','第三の要点です。'],sections:[{heading:'仕組みを確かめる',start:0},{heading:'判断をつなぐ',start:2}],diagram:{type:'flow',title:'検証用の図',items:[{icon:'document',label:'反応',text:'反応を集める'},{icon:'arrow',label:'判断',text:'次の条件を決める'}],caption:'検証用の説明です。'},action:'検証用の判断条件を一つ書き出します。'},
+ }))};
+}
+function connectedEditions(){
+ const older=syntheticDay('2026-10-20'),newer=syntheticDay('2026-10-21');
+ const target=older.articles[1];
+ newer.articles[0].reading.relatedArticle={id:target.id,title:target.title};
+ return {older,newer,article:newer.articles[0],articles:[...newer.articles,...older.articles],target};
+}
 test('the visual edition has three stable, sourced articles',()=>{assert.equal(validateDay(day).length,3);});
 test('partial editions, invalid IDs and reference protocols are rejected',()=>{
  for(const modify of [d=>d.articles.pop(),d=>d.articles[0].id='wrong',d=>d.articles[0].sources[0].url='javascript:alert(1)',d=>d.articles[0].publishedAt='invalid']){
@@ -67,6 +82,123 @@ test('older plain articles remain readable without broken illustration reference
  assert.ok(!withoutTemplates(html).includes('illustrations/'));
  assert.ok(!rss.includes('<media:thumbnail '));
  assert.ok(html.includes(a.body.split('\n\n')[0]));
+});
+
+test('one related article must match a real article from an older edition',()=>{
+ const {older,newer,articles}=connectedEditions(),before=structuredClone(articles);
+ assert.equal(validateDay(older).length,3);assert.equal(validateDay(newer).length,3);
+ assert.doesNotThrow(()=>validateRelatedArticles(articles));
+ assert.deepEqual(articles,before,'validation must not normalize existing article data');
+ for(const modify of [
+  fixture=>fixture.articles=fixture.articles.filter(a=>a.id!==fixture.target.id),
+  fixture=>fixture.article.reading.relatedArticle.title='存在する記事とは違うタイトル',
+  fixture=>fixture.article.reading.relatedArticle={id:fixture.article.id,title:fixture.article.title},
+  fixture=>fixture.article.reading.relatedArticle={id:fixture.newer.articles[1].id,title:fixture.newer.articles[1].title},
+  fixture=>{const future=syntheticDay('2026-10-22').articles[0];fixture.articles.push(future);fixture.article.reading.relatedArticle={id:future.id,title:future.title};},
+  fixture=>fixture.target.publishedAt='2026-10-21T03:00:00+09:00',
+ ]){
+  const fixture=connectedEditions();modify(fixture);
+  assert.throws(()=>validateRelatedArticles(fixture.articles),/Related article/);
+ }
+});
+
+test('related article metadata accepts only one bounded local ID and title',()=>{
+ const invalid=[null,[],{},[{id:'2026-10-20-2',title:'複数指定'}],
+  {id:'2026-10-20-2'},{title:'IDがない'},
+  {id:'2026-10-20-2',title:' '},{id:'2026-10-20-2',title:'あ'.repeat(201)},
+  {id:'2026-10-20-2',title:'検証',url:'https://outside.example/article'},
+  ...['2026-10-20-4','../2026-10-20-2','https://outside.example/article','javascript:alert(1)','2026-10-20-2\" onclick=\"bad()'].map(id=>({id,title:'検証'})),
+ ];
+ for(const reference of invalid){
+  const copy=syntheticDay('2026-10-21');copy.articles[0].reading.relatedArticle=reference;
+  assert.throws(()=>validateDay(copy),/related article/);
+  assert.throws(()=>validateRelatedArticles(copy.articles),/related article/);
+  assert.ok(!renderArticle({...context,articles:copy.articles,article:copy.articles[0]}).includes('関連する過去記事：'));
+  assert.ok(!renderFeed({...context,articles:copy.articles}).includes('関連する過去記事：'));
+ }
+});
+
+test('HTML and RSS place one related link after the narrated body and before the action',()=>{
+ const {article,articles,target}=connectedEditions();
+ const html=withoutTemplates(renderArticle({...context,articles,article}));
+ const rss=renderFeed({...context,articles:[article]});
+ const url=`https://example.test/ai-daily/articles/${target.id}.html`;
+ const body=article.body.split('\n\n'),last=body.at(-1);
+ for(const output of [html,rss]){
+  assert.equal(output.split(`href="${url}"`).length-1,1);
+  assert.ok(output.indexOf(last)<output.indexOf('関連する過去記事：'));
+  assert.ok(output.indexOf('関連する過去記事：')<output.indexOf(article.reading.action));
+  for(const paragraph of body)assert.equal(output.split(paragraph).length-1,1);
+  const link=output.match(/<p class="diagram-link">関連する過去記事：[\s\S]*?<\/p>/)?.[0];
+  assert.ok(link?.includes(`>${target.title}<span`));
+  assert.ok(link.includes('target="_blank" rel="noopener noreferrer"'));
+  assert.ok(!link.includes('data-speech-chunk')&&!link.includes('data-audio-cue'));
+ }
+ assert.equal((html.match(/data-audio-cue="paragraph-2"/g)||[]).length,1);
+ assert.ok(html.includes(`data-audio-cue="paragraph-2">${last}</p>`));
+ const withoutLink=structuredClone(article);delete withoutLink.reading.relatedArticle;
+ assert.equal(articleAudioHash(article),articleAudioHash(withoutLink));
+ assert.deepEqual(article.sources,withoutLink.sources);
+ assert.equal(renderIndex({...context,articles:[article]}),renderIndex({...context,articles:[withoutLink]}));
+});
+
+test('related links in inert daily templates appear when their article is selected',()=>{
+ const {newer,articles,target}=connectedEditions();
+ const html=renderArticle({...context,articles,article:newer.articles[1]});
+ assert.ok(!withoutTemplates(html).includes('関連する過去記事：'));
+ const template=html.match(/<template\b[^>]*data-article-id="2026-10-21-1"[^>]*>([\s\S]*?)<\/template>/)?.[1];
+ assert.ok(template?.includes(`articles/${target.id}.html`));
+ assert.equal((template.match(/関連する過去記事：/g)||[]).length,1);
+});
+
+test('related article titles cannot inject HTML, attributes or CDATA',()=>{
+ const {older,newer,article,articles,target}=connectedEditions();
+ const attack='\"><script>bad()</script> ]]> & quote';
+ target.title=attack;article.reading.relatedArticle.title=attack;
+ validateDay(older);validateDay(newer);validateRelatedArticles(articles);
+ for(const output of [renderArticle({...context,articles,article}),renderFeed({...context,articles:[article]})]){
+  assert.ok(!output.includes('<script>bad()'));
+  assert.ok(output.includes('&quot;&gt;&lt;script&gt;bad()&lt;/script&gt; ]]&gt; &amp; quote'));
+  assert.ok(!output.includes(']]> & quote'));
+ }
+});
+
+test('absent related metadata preserves pre-feature HTML, RSS, index and audio hashes',()=>{
+ const edition=syntheticDay('2026-10-21');
+ const fixtureContext={title:'検証用の朝の3本',baseUrl:context.baseUrl,articles:edition.articles};
+ const hash=value=>createHash('sha256').update(value).digest('hex');
+ // Captured from the renderer before related-article support, using only this synthetic edition.
+ assert.equal(hash(renderArticle({...fixtureContext,article:edition.articles[0]})),'e2fd35c2fb5ce13bf74c0caa1943080e0cd21f3dea4a60c19530d96cf4ba4c45');
+ assert.equal(hash(renderFeed(fixtureContext)),'8d56fa75d1bf80ae8c88dea09a670e8be3e91b1dbf1ea8ea355e8a312b4e640e');
+ assert.equal(hash(renderIndex(fixtureContext)),'92b6baa91dbf47a334a796f6b1efb6f46f611df5b012691d4f3f5d6af1f94dc5');
+ assert.equal(articleAudioHash(edition.articles[0]),'33cb96e0039e5056b26733881063fd804a266eb00308cba57968147b3f4dcee0');
+});
+
+test('a build validates related targets before replacing output and publishes valid links',async()=>{
+ const temporary=await mkdtemp(join(tmpdir(),'ai-daily-related-'));
+ try{
+  const {older,newer,article,target}=connectedEditions();
+  await mkdir(join(temporary,'content'));await mkdir(join(temporary,'web'));
+  await mkdir(join(temporary,'dist'));const sentinel=join(temporary,'dist','prior-output.txt');
+  await writeFile(sentinel,'previous verified output');
+  await writeFile(join(temporary,'site.json'),JSON.stringify({title:'関連記事の検証',baseUrl:context.baseUrl}));
+  for(const name of ['style.css','speech.mjs','audio-player.mjs'])await writeFile(join(temporary,'web',name),'');
+  const newerPath=join(temporary,'content',`${newer.date}.json`);
+  await writeFile(newerPath,JSON.stringify(newer));
+  await assert.rejects(buildSite({projectRoot:temporary}),/Related article target not found/);
+  assert.equal(await readFile(sentinel,'utf8'),'previous verified output');
+  await writeFile(join(temporary,'content',`${older.date}.json`),JSON.stringify(older));
+  article.reading.relatedArticle.title='別のタイトル';await writeFile(newerPath,JSON.stringify(newer));
+  await assert.rejects(buildSite({projectRoot:temporary}),/Related article title must match/);
+  assert.equal(await readFile(sentinel,'utf8'),'previous verified output');
+  article.reading.relatedArticle.title=target.title;await writeFile(newerPath,JSON.stringify(newer));
+  const result=await buildSite({projectRoot:temporary});
+  assert.equal(result.articles,6);assert.equal(result.days,2);
+  const html=await readFile(join(temporary,'dist','articles',`${article.id}.html`),'utf8');
+  const rss=await readFile(join(temporary,'dist','feed.xml'),'utf8');
+  assert.ok(html.includes(`href="${context.baseUrl}articles/${target.id}.html"`));
+  assert.ok(rss.includes(`関連する過去記事：<a href="${context.baseUrl}articles/${target.id}.html"`));
+ }finally{await rm(temporary,{recursive:true,force:true});}
 });
 
 const figureSource={title:'公式発表のテスト資料',url:'https://www.jreast.co.jp/press/2026/example.html'};

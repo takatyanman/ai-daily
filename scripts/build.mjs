@@ -1,7 +1,7 @@
 import {readFile,writeFile,readdir,mkdir,rm,copyFile,lstat,realpath} from 'node:fs/promises';
 import {resolve,dirname,join} from 'node:path';
 import {fileURLToPath,pathToFileURL} from 'node:url';
-import {renderIndex,renderArticle,figureImageUrl,localFigureFilename,renderSourceFigures} from '../web/render.mjs';
+import {renderIndex,renderArticle,figureImageUrl,localFigureFilename,renderSourceFigures,relatedArticleReference,renderRelatedArticle} from '../web/render.mjs';
 import {renderIllustrationSvg,renderArticleThumbnailSvg,articleIllustrationPath} from '../web/illustrations.mjs';
 const root=resolve(dirname(fileURLToPath(import.meta.url)),'..');
 export const xml=s=>String(s).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'",'&apos;');
@@ -13,6 +13,7 @@ export function validateReading(a){
  const r=a.reading;
  const text=(value,max,label)=>{if(typeof value!=='string'||!value.trim()||value.length>max)throw Error(`Invalid reading ${label}`);};
  if(typeof r!=='object'||Array.isArray(r))throw Error('Invalid reading guide');
+ if(r.relatedArticle!==undefined&&!relatedArticleReference(a))throw Error('Invalid reading related article: one ID and title required');
  text(r.hook,120,'hook');text(r.action,200,'action');
  if(!Array.isArray(r.takeaways)||r.takeaways.length!==3)throw Error('Three reading takeaways required');
  for(const value of r.takeaways)text(value,90,'takeaway');
@@ -59,6 +60,18 @@ export function validateDay(day){
  }
  return day.articles;
 }
+export function validateRelatedArticles(articles){
+ const byId=new Map(articles.map(a=>[a.id,a]));
+ for(const a of articles){
+  if(a.reading?.relatedArticle===undefined)continue;
+  const reference=relatedArticleReference(a);
+  if(!reference)throw Error('Invalid reading related article: one ID and title required');
+  const target=byId.get(reference.id);
+  if(!target)throw Error(`Related article target not found: ${reference.id}`);
+  if(target.title!==reference.title)throw Error(`Related article title must match the existing article: ${reference.id}`);
+  if(reference.id.slice(0,10)>=a.id.slice(0,10)||!(Date.parse(target.publishedAt)<Date.parse(a.publishedAt)))throw Error('Related article must be from an older edition');
+ }
+}
 export function renderFeedBody(a,base){
  const p=paragraphs(a),r=a.reading;
  const headings=new Map((r?.sections||[]).map(s=>[s.start,s.heading]));
@@ -68,6 +81,7 @@ export function renderFeedBody(a,base){
   full+=`<p><img src="${xml(thumbnail)}" alt="${xml(a.title)}のイラスト" width="640" height="360"></p><p><strong>${xml(r.hook)}</strong></p><h2>この記事のポイント</h2><ul>${r.takeaways.map(s=>`<li>${xml(s)}</li>`).join('')}</ul>`;
  }
  full+=p.map((value,i)=>`${headings.has(i)?`<h2>${xml(headings.get(i))}</h2>`:''}<p>${xml(value).replaceAll('\n','<br>')}</p>${renderSourceFigures(a,i)}`).join('');
+ full+=renderRelatedArticle(a,base);
  if(r)full+=`<h2>ひとつ試すなら</h2><p>${xml(r.action)}</p>`;
  full+=`<h2>参照元</h2><ul>${a.sources.map(s=>`<li><a href="${xml(publicUrl(s.url))}">${xml(s.title)}</a></li>`).join('')}</ul>`;
  return full;
@@ -113,6 +127,7 @@ export async function buildSite({projectRoot=root,output=join(projectRoot,'dist'
  const files=(await readdir(join(projectRoot,'content'))).filter(f=>/^\d{4}-\d{2}-\d{2}\.json$/.test(f)).sort();
  const articles=[];for(const file of files){const day=JSON.parse(await readFile(join(projectRoot,'content',file),'utf8'));if(file!==`${day.date}.json`)throw Error('Day file/date mismatch');articles.push(...validateDay(day));}
  if(!articles.length)throw Error('At least one complete daily edition is required');
+ validateRelatedArticles(articles);
  articles.sort((a,b)=>new Date(b.publishedAt)-new Date(a.publishedAt)||a.id.localeCompare(b.id));
  await rm(output,{recursive:true,force:true});await mkdir(join(output,'articles'),{recursive:true});await mkdir(join(output,'illustrations'),{recursive:true});
  const context={title:config.title,baseUrl:base,articles};

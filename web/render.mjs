@@ -20,6 +20,23 @@ function articleUrl(article, baseUrl) {
   return absolute(`articles/${encodeURIComponent(String(article.id))}.html`, baseUrl);
 }
 
+/** A related article is a single local reference, never an author-supplied URL. */
+export function relatedArticleReference(article) {
+  const reference = article?.reading?.relatedArticle;
+  if (!reference || typeof reference !== 'object' || Array.isArray(reference)) return null;
+  const keys = Object.keys(reference);
+  if (keys.length !== 2 || !keys.includes('id') || !keys.includes('title')) return null;
+  if (typeof reference.id !== 'string' || !/^\d{4}-\d{2}-\d{2}-[123]$/.test(reference.id)) return null;
+  if (typeof reference.title !== 'string' || !reference.title.trim() || reference.title.length > 200) return null;
+  return reference;
+}
+
+export function renderRelatedArticle(article, baseUrl) {
+  const reference = relatedArticleReference(article);
+  if (!reference) return '';
+  return `<p class="diagram-link">関連する過去記事：<a href="${escapeAttribute(articleUrl(reference, baseUrl))}" target="_blank" rel="noopener noreferrer">${escapeHtml(reference.title)}<span aria-hidden="true"> ↗</span></a></p>`;
+}
+
 function dateInfo(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return null;
@@ -291,6 +308,7 @@ function articleContent(article, baseUrl) {
   const sources = Array.isArray(article.sources) ? article.sources : [];
   const paragraphs = String(article.body ?? '').trim().split(/\r?\n\s*\r?\n/).filter(Boolean);
   const hasPrimaryFigure = hasSourceFigures(article, paragraphs.length);
+  const relatedArticle = renderRelatedArticle(article, baseUrl);
   const sourceItems = sources.map((source) => {
     const url = sourceUrl(source.url);
     const label = source.title || source.url || '参照元';
@@ -301,7 +319,7 @@ function articleContent(article, baseUrl) {
       ${hasPrimaryFigure ? (hasDiagram(article) ? `<p class="diagram-link"><a href="${escapeAttribute(absolute(articleIllustrationPath(article), baseUrl))}" target="_blank" rel="noopener noreferrer">要点の図解を別に見る<span aria-hidden="true"> ↗</span></a></p>` : '') : illustration(article, baseUrl)}
       <div class="article-body">
 ${articleBody(article, paragraphs)}
-      </div>
+      </div>${relatedArticle ? `\n      ${relatedArticle}` : ''}
       ${article.reading?.action ? `<aside class="try-action"><div class="action-mark" aria-hidden="true">✓</div><div><h2 data-speech-chunk data-audio-cue="action-heading">ひとつ、試してみる</h2><p data-speech-chunk data-audio-cue="action">${escapeHtml(article.reading.action)}</p></div></aside>` : ''}
       <aside class="sources" aria-labelledby="sources-title">
         <p class="eyebrow">SOURCES</p>
