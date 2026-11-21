@@ -241,6 +241,7 @@ function document({ title, description, baseUrl, content, pageClass = '' }) {
   const homeUrl = absolute('./', baseUrl);
   const feedUrl = absolute('feed.xml', baseUrl);
   const stylesheetUrl = absolute(`style.css?v=${AUDIO_UI_REVISION}`, baseUrl);
+  const indexPage = pageClass === 'index-page';
   return `<!doctype html>
 <html lang="ja">
 <head>
@@ -250,7 +251,7 @@ function document({ title, description, baseUrl, content, pageClass = '' }) {
   <meta name="description" content="${escapeAttribute(description)}">
   <meta name="theme-color" content="#254b3e">
   <title>${escapeHtml(title)}</title>
-  <link rel="stylesheet" href="${escapeAttribute(stylesheetUrl)}">
+  <link rel="stylesheet" href="${escapeAttribute(stylesheetUrl)}">${indexPage ? `\n  <link rel="stylesheet" href="${escapeAttribute(absolute('index-search.css', baseUrl))}">` : ''}
   <link rel="alternate" type="application/rss+xml" title="あなたの朝の3本 RSS" href="${escapeAttribute(feedUrl)}">
 </head>
 <body class="${escapeAttribute(pageClass)}">
@@ -268,7 +269,7 @@ ${content}
     <p>AIが作成した記事です。重要な情報は参照元もご確認ください。</p>
     <div class="footer-links"><a href="${escapeAttribute(homeUrl)}">記事一覧</a><span aria-hidden="true">·</span><a href="${escapeAttribute(feedUrl)}">RSS</a></div>
   </footer>
-  ${pageClass === 'article-page' ? `<script type="module" src="${escapeAttribute(absolute(`audio-player.js?v=${AUDIO_UI_REVISION}`, baseUrl))}"></script>` : ''}
+  ${pageClass === 'article-page' ? `<script type="module" src="${escapeAttribute(absolute(`audio-player.js?v=${AUDIO_UI_REVISION}`, baseUrl))}"></script>` : ''}${indexPage ? `<script type="module" src="${escapeAttribute(absolute('index-search.js', baseUrl))}"></script>` : ''}
 </body>
 </html>
 `;
@@ -284,11 +285,20 @@ export function renderIndex({ title = 'あなたの朝の3本', baseUrl, article
       <p class="intro-description">何が変わったか、なぜ重要か。公開情報から、仕事への接点も整理します。</p>
     </section>
     <section class="article-list-section" aria-labelledby="articles-title">
-      <div class="section-heading"><h2 id="articles-title">届いた記事</h2><span>${escapeHtml(entries.length)} ARTICLES</span></div>
-      ${entries.length ? `<ol class="article-list">
+      <div class="section-heading"><h2 id="articles-title">届いた記事</h2><span role="status" data-index-search-count>${entries.length}件</span></div>
+      ${entries.length ? `<form class="index-search" data-index-search role="search" hidden>
+        <label for="article-search">記事を検索</label>
+        <div class="index-search-controls">
+          <input id="article-search" type="search" placeholder="Suica など" maxlength="120" autocomplete="off" enterkeyhint="search">
+          <button type="button" data-index-search-clear>クリア</button>
+        </div>
+      </form>
+      <p class="index-search-empty" data-index-search-empty hidden>該当する記事がありません。</p>
+      <ol class="article-list">
 ${entries.map((article, index) => {
   const figure = indexFigure(article);
-  return `        <li class="article-card">
+  const searchText = [article.title, article.category, article.summary, article.reading?.hook].join('\n');
+  return `        <li class="article-card" data-index-search-text="${escapeAttribute(searchText)}">
           <span class="article-number" aria-hidden="true">${escapeHtml(String(index + 1).padStart(2, '0'))}</span>
           <article class="card-content">
             ${metadata(article)}

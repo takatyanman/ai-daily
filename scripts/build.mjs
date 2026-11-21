@@ -140,6 +140,8 @@ export async function buildSite({projectRoot=root,output=join(projectRoot,'dist'
  await copyFile(join(projectRoot,'web/style.css'),join(output,'style.css'));
  await copyFile(join(projectRoot,'web/speech.mjs'),join(output,'speech.js'));
  await copyFile(join(projectRoot,'web/audio-player.mjs'),join(output,'audio-player.js'));
+ await copyFile(join(projectRoot,'web/index-search.mjs'),join(output,'index-search.js'));
+ await copyFile(join(projectRoot,'web/index-search.css'),join(output,'index-search.css'));
  await writeFile(join(output,'robots.txt'),'User-agent: *\nDisallow: /\n');await writeFile(join(output,'.nojekyll'),'');
  return {articles:articles.length,days:files.length,baseUrl:base,output};
 }

@@ -163,14 +163,13 @@ test('related article titles cannot inject HTML, attributes or CDATA',()=>{
  }
 });
 
-test('absent related metadata preserves pre-feature HTML, RSS, index and audio hashes',()=>{
+test('absent related metadata preserves pre-feature article HTML, RSS and audio hashes',()=>{
  const edition=syntheticDay('2026-10-21');
  const fixtureContext={title:'検証用の朝の3本',baseUrl:context.baseUrl,articles:edition.articles};
  const hash=value=>createHash('sha256').update(value).digest('hex');
  // Captured from the renderer before related-article support, using only this synthetic edition.
  assert.equal(hash(renderArticle({...fixtureContext,article:edition.articles[0]})),'e2fd35c2fb5ce13bf74c0caa1943080e0cd21f3dea4a60c19530d96cf4ba4c45');
  assert.equal(hash(renderFeed(fixtureContext)),'8d56fa75d1bf80ae8c88dea09a670e8be3e91b1dbf1ea8ea355e8a312b4e640e');
- assert.equal(hash(renderIndex(fixtureContext)),'92b6baa91dbf47a334a796f6b1efb6f46f611df5b012691d4f3f5d6af1f94dc5');
  assert.equal(articleAudioHash(edition.articles[0]),'33cb96e0039e5056b26733881063fd804a266eb00308cba57968147b3f4dcee0');
 });
 
@@ -182,7 +181,7 @@ test('a build validates related targets before replacing output and publishes va
   await mkdir(join(temporary,'dist'));const sentinel=join(temporary,'dist','prior-output.txt');
   await writeFile(sentinel,'previous verified output');
   await writeFile(join(temporary,'site.json'),JSON.stringify({title:'関連記事の検証',baseUrl:context.baseUrl}));
-  for(const name of ['style.css','speech.mjs','audio-player.mjs'])await writeFile(join(temporary,'web',name),'');
+  for(const name of ['style.css','speech.mjs','audio-player.mjs','index-search.mjs','index-search.css'])await writeFile(join(temporary,'web',name),'');
   const newerPath=join(temporary,'content',`${newer.date}.json`);
   await writeFile(newerPath,JSON.stringify(newer));
   await assert.rejects(buildSite({projectRoot:temporary}),/Related article target not found/);
@@ -209,16 +208,29 @@ function quotedDay(){
  return copy;
 }
 
+test('index search starts hidden and uses escaped public metadata without adding article body text',()=>{
+ const article=syntheticDay('2026-10-21').articles[0];
+ article.summary='要約だけの語 & "水力"';
+ article.reading.hook='導入だけの語 <案内>';
+ const index=renderIndex({...context,articles:[article]});
+ const body=renderArticle({...context,articles:[article],article});
+ assert.ok(index.includes('data-index-search role="search" hidden'));
+ assert.ok(index.includes(`data-index-search-text="${article.title}\n${article.category}\n要約だけの語 &amp; &quot;水力&quot;\n導入だけの語 &lt;案内&gt;"`));
+ assert.ok(index.includes(`src="${context.baseUrl}index-search.js"`));
+ assert.ok(!index.includes(article.body.split('\n\n')[0]));
+ assert.ok(!body.includes('index-search.js')&&!body.includes('data-index-search-text'));
+});
+
 test('index cards preview the article figure and link to its full explanation',()=>{
  const copy=quotedDay(),article=copy.articles[0],before=structuredClone(copy);
  const html=renderIndex({...context,articles:copy.articles});
- const card=html.match(/<li class="article-card">[\s\S]*?<\/li>/)[0];
+ const card=html.match(/<li class="article-card"[^>]*>[\s\S]*?<\/li>/)[0];
  assert.ok(card.includes('data-article-preview="figure"'));
  assert.ok(card.includes('src="https://prcdn.freetls.fastly.net/release_image/17557/example.png?width=640&amp;quality=80"'));
  assert.ok(card.includes(`href="${context.baseUrl}articles/${article.id}.html"`));
  assert.ok(card.includes('object-fit:contain')&&card.includes('referrerpolicy="no-referrer"'));
  assert.ok(!card.includes('<svg'));
- const cards=html.match(/<li class="article-card">[\s\S]*?<\/li>/g);
+ const cards=html.match(/<li class="article-card"[^>]*>[\s\S]*?<\/li>/g);
  for(const fallback of cards.slice(1))assert.ok(fallback.includes('<svg'),'articles without a figure retain their existing preview');
  assert.deepEqual(copy,before,'a preview must not rewrite published article data');
 });
@@ -332,12 +344,16 @@ test('a build copies only referenced raster assets and rejects disguised or link
   await writeFile(join(temporary,'web','style.css'),'body{color:#000}');
   await writeFile(join(temporary,'web','speech.mjs'),'export const fixture = true;');
   await writeFile(join(temporary,'web','audio-player.mjs'),'export const audioFixture = true;');
+  await writeFile(join(temporary,'web','index-search.mjs'),'export const indexFixture = true;');
+  await writeFile(join(temporary,'web','index-search.css'),'.index-search{margin:1em}');
   const source=join(temporary,'web','figures',name);
   await writeFile(source,image);await writeFile(join(temporary,'web','figures','unreferenced.png'),image);
   await buildSite({projectRoot:temporary});
   assert.deepEqual(await readFile(join(temporary,'dist','figures',name)),image);
   assert.equal(await readFile(join(temporary,'dist','speech.js'),'utf8'),'export const fixture = true;');
   assert.equal(await readFile(join(temporary,'dist','audio-player.js'),'utf8'),'export const audioFixture = true;');
+  assert.equal(await readFile(join(temporary,'dist','index-search.js'),'utf8'),'export const indexFixture = true;');
+  assert.equal(await readFile(join(temporary,'dist','index-search.css'),'utf8'),'.index-search{margin:1em}');
   await assert.rejects(readFile(join(temporary,'dist','figures','unreferenced.png')));
   await writeFile(source,'<html>This is not a PNG.</html>');
   await assert.rejects(buildSite({projectRoot:temporary}),/Invalid or oversized quoted image asset/);
