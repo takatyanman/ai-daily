@@ -215,8 +215,9 @@ test('index search starts hidden and uses escaped public metadata without adding
  const index=renderIndex({...context,articles:[article]});
  const body=renderArticle({...context,articles:[article],article});
  assert.ok(index.includes('data-index-search role="search" hidden'));
+ assert.ok(index.includes(`data-index-search-id="${article.id}"`));
  assert.ok(index.includes(`data-index-search-text="${article.title}\n${article.category}\n要約だけの語 &amp; &quot;水力&quot;\n導入だけの語 &lt;案内&gt;"`));
- assert.ok(index.includes(`src="${context.baseUrl}index-search.js"`));
+ assert.ok(index.includes(`src="${context.baseUrl}index-search.js?v=body"`));
  assert.ok(!index.includes(article.body.split('\n\n')[0]));
  assert.ok(!body.includes('index-search.js')&&!body.includes('data-index-search-text'));
 });
@@ -354,6 +355,8 @@ test('a build copies only referenced raster assets and rejects disguised or link
   assert.equal(await readFile(join(temporary,'dist','audio-player.js'),'utf8'),'export const audioFixture = true;');
   assert.equal(await readFile(join(temporary,'dist','index-search.js'),'utf8'),'export const indexFixture = true;');
   assert.equal(await readFile(join(temporary,'dist','index-search.css'),'utf8'),'.index-search{margin:1em}');
+  const searchBodies=JSON.parse(await readFile(join(temporary,'dist','article-search.json'),'utf8'));
+  assert.deepEqual(searchBodies,Object.fromEntries(copy.articles.map(({id,body})=>[id,body])));
   await assert.rejects(readFile(join(temporary,'dist','figures','unreferenced.png')));
   await writeFile(source,'<html>This is not a PNG.</html>');
   await assert.rejects(buildSite({projectRoot:temporary}),/Invalid or oversized quoted image asset/);

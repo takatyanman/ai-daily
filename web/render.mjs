@@ -269,7 +269,7 @@ ${content}
     <p>AIが作成した記事です。重要な情報は参照元もご確認ください。</p>
     <div class="footer-links"><a href="${escapeAttribute(homeUrl)}">記事一覧</a><span aria-hidden="true">·</span><a href="${escapeAttribute(feedUrl)}">RSS</a></div>
   </footer>
-  ${pageClass === 'article-page' ? `<script type="module" src="${escapeAttribute(absolute(`audio-player.js?v=${AUDIO_UI_REVISION}`, baseUrl))}"></script>` : ''}${indexPage ? `<script type="module" src="${escapeAttribute(absolute('index-search.js', baseUrl))}"></script>` : ''}
+  ${pageClass === 'article-page' ? `<script type="module" src="${escapeAttribute(absolute(`audio-player.js?v=${AUDIO_UI_REVISION}`, baseUrl))}"></script>` : ''}${indexPage ? `<script type="module" src="${escapeAttribute(absolute('index-search.js?v=body', baseUrl))}"></script>` : ''}
 </body>
 </html>
 `;
@@ -287,18 +287,19 @@ export function renderIndex({ title = 'あなたの朝の3本', baseUrl, article
     <section class="article-list-section" aria-labelledby="articles-title">
       <div class="section-heading"><h2 id="articles-title">届いた記事</h2><span role="status" data-index-search-count>${entries.length}件</span></div>
       ${entries.length ? `<form class="index-search" data-index-search role="search" hidden>
-        <label for="article-search">記事を検索</label>
+        <label for="article-search">タイトル・本文から記事を探す</label>
         <div class="index-search-controls">
           <input id="article-search" type="search" placeholder="Suica など" maxlength="120" autocomplete="off" enterkeyhint="search">
           <button type="button" data-index-search-clear>クリア</button>
         </div>
       </form>
+      <p class="index-search-empty" data-index-search-unavailable role="status" hidden>本文を取得できませんでした。タイトルや要約の検索結果を表示しています。</p>
       <p class="index-search-empty" data-index-search-empty hidden>該当する記事がありません。</p>
       <ol class="article-list">
 ${entries.map((article, index) => {
   const figure = indexFigure(article);
   const searchText = [article.title, article.category, article.summary, article.reading?.hook].join('\n');
-  return `        <li class="article-card" data-index-search-text="${escapeAttribute(searchText)}">
+  return `        <li class="article-card" data-index-search-id="${escapeAttribute(article.id)}" data-index-search-text="${escapeAttribute(searchText)}">
           <span class="article-number" aria-hidden="true">${escapeHtml(String(index + 1).padStart(2, '0'))}</span>
           <article class="card-content">
             ${metadata(article)}

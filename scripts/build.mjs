@@ -133,6 +133,7 @@ export async function buildSite({projectRoot=root,output=join(projectRoot,'dist'
  const context={title:config.title,baseUrl:base,articles};
  await copyFigureAssets(articles,projectRoot,output);
  await writeFile(join(output,'index.html'),renderIndex(context));await writeFile(join(output,'feed.xml'),renderFeed(context));
+ await writeFile(join(output,'article-search.json'),JSON.stringify(Object.fromEntries(articles.map(({id,body})=>[id,body]))));
  for(const article of articles){
   await writeFile(join(output,'articles',`${article.id}.html`),renderArticle({...context,article}));
   if(article.reading){await writeFile(join(output,articleIllustrationPath(article)),renderIllustrationSvg(article));await writeFile(join(output,'illustrations',`${article.id}-thumb.svg`),renderArticleThumbnailSvg(article));}
