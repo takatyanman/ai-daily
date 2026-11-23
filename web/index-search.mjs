@@ -2,6 +2,9 @@ const form = document.querySelector('[data-index-search]');
 
 if (form) {
   const input = form.querySelector('input');
+  const history = window.history;
+  const savedQuery = history.state?.articleSearchQuery;
+  if (typeof savedQuery === 'string') input.value = savedQuery;
   const clear = form.querySelector('[data-index-search-clear]');
   const count = document.querySelector('[data-index-search-count]');
   const empty = document.querySelector('[data-index-search-empty]');
@@ -35,7 +38,13 @@ if (form) {
   }
 
   function filterArticles() {
-    const query = normalize(input.value);
+    const value = input.value;
+    if (value !== (history.state?.articleSearchQuery ?? '')) {
+      try {
+        history.replaceState({ ...history.state, articleSearchQuery: value }, '');
+      } catch { /* Filtering remains usable when the browser cannot save history state. */ }
+    }
+    const query = normalize(value);
     if (query && bodyState === 'idle') void loadBodies();
     let matches = 0;
     for (const { card, id, text } of cards) {
