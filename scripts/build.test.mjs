@@ -225,14 +225,22 @@ test('index search starts hidden and uses escaped public metadata without adding
 test('index cards preview the article figure and link to its full explanation',()=>{
  const copy=quotedDay(),article=copy.articles[0],before=structuredClone(copy);
  const html=renderIndex({...context,articles:copy.articles});
+ const articleHtml=renderArticle({...context,article});
+ const articleUrl=`${context.baseUrl}articles/${article.id}.html`;
  const card=html.match(/<li class="article-card"[^>]*>[\s\S]*?<\/li>/)[0];
  assert.ok(card.includes('data-article-preview="figure"'));
  assert.ok(card.includes('src="https://prcdn.freetls.fastly.net/release_image/17557/example.png?width=640&amp;quality=80"'));
- assert.ok(card.includes(`href="${context.baseUrl}articles/${article.id}.html"`));
+ assert.ok(card.includes(`<a class="card-visual" href="${articleUrl}#source-figure-1" aria-label="${article.title}の図と出典を見る"`));
+ assert.ok(articleHtml.includes('<figure class="source-figure" id="source-figure-1" tabindex="-1"'));
+ assert.ok(card.includes(`<h3><a href="${articleUrl}"`));
+ assert.ok(card.includes(`<a class="read-link" href="${articleUrl}"`));
  assert.ok(card.includes('object-fit:contain')&&card.includes('referrerpolicy="no-referrer"'));
  assert.ok(!card.includes('<svg'));
  const cards=html.match(/<li class="article-card"[^>]*>[\s\S]*?<\/li>/g);
- for(const fallback of cards.slice(1))assert.ok(fallback.includes('<svg'),'articles without a figure retain their existing preview');
+ for(const fallback of cards.slice(1)){
+  assert.ok(fallback.includes('<svg'),'articles without a figure retain their existing preview');
+  assert.ok(!fallback.includes('#source-figure-'));
+ }
  assert.deepEqual(copy,before,'a preview must not rewrite published article data');
 });
 
@@ -253,7 +261,10 @@ test('index previews cannot use uncited, unattributed, out-of-context or unsafe 
  }
  const article=quotedDay().articles[0],valid=structuredClone(article.reading.figures[0]);
  article.reading.figures=[{...valid,after:999},valid];
- assert.ok(renderIndex({...context,articles:[article]}).includes('data-article-preview="figure"'));
+ assert.ok(renderIndex({...context,articles:[article]}).includes(`${article.id}.html#source-figure-2"`));
+ const body=renderArticle({...context,article});
+ assert.ok(body.includes('<figure class="source-figure" id="source-figure-2"'));
+ assert.ok(!body.includes('id="source-figure-1"'));
  article.reading.figures=[{...valid,after:999},{...valid,credit:''},valid];
  assert.ok(!renderIndex({...context,articles:[article]}).includes('data-article-preview="figure"'));
 });
@@ -277,6 +288,7 @@ test('a cited figure stays with its body context in HTML and RSS without replaci
  assert.ok(html.includes('referrerpolicy="no-referrer"'));
  assert.ok(rss.indexOf('-thumb.png')<rss.indexOf('release_image/17557/example.png'));
  assert.ok(rss.includes(figureSource.url)&&rss.includes(a.reading.figures[0].credit));
+ assert.ok(!rss.includes('id="source-figure-'));
  assert.equal((rss.match(/<media:thumbnail /g)||[]).length,3);
  for(const text of p)assert.equal(html.split(text).length-1,1);
 });

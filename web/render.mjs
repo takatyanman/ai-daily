@@ -98,23 +98,28 @@ function secureSourceUrl(value) {
   }
 }
 
+const sourceFigureAnchor = (position) => `source-figure-${position + 1}`;
+
 /** The explanatory text is deliberately adjacent to, and separate from, the quoted material. */
-export function renderSourceFigures(article, after) {
+export function renderSourceFigures(article, after, { anchors = false } = {}) {
   const figures = Array.isArray(article?.reading?.figures) ? article.reading.figures.slice(0, 2) : [];
   const sources = new Set((Array.isArray(article.sources) ? article.sources : []).map(source => secureSourceUrl(source.url)).filter(Boolean));
-  return figures.filter(figure => figure?.after === after).slice(0, 2).map(figure => {
+  return figures.map((figure, position) => {
+    if (!figure || figure.after !== after) return '';
     const image = figureImageUrl(figure.url), source = secureSourceUrl(figure.sourceUrl);
     const usage = figure.usage ?? 'quote', license = secureSourceUrl(figure.licenseUrl);
     if (!image || !source || !sources.has(source) || !['quote', 'licensed', 'original'].includes(usage)) return '';
     if (usage === 'licensed' && (!license || typeof figure.licenseTitle !== 'string' || !figure.licenseTitle.trim())) return '';
     const label = usage === 'licensed' ? '写真（利用条件に基づき掲載）' : usage === 'original' ? '公開データから作図' : '資料から引用';
-    return `<figure class="source-figure">
+    // Keep the destination visible below the sticky audio controls on small screens.
+    const anchor = anchors ? ` id="${sourceFigureAnchor(position)}" tabindex="-1" style="scroll-margin-top: min(340px, 60vh)"` : '';
+    return `<figure class="source-figure"${anchor}>
           <span class="figure-label">${label}</span>
           <a class="source-image-link" href="${escapeAttribute(image)}" target="_blank" rel="noopener noreferrer"><img src="${escapeAttribute(image)}" alt="${escapeAttribute(figure.alt)}" style="max-width:100%;height:auto" loading="lazy" decoding="async" referrerpolicy="no-referrer"></a>
           <figcaption><strong>${escapeHtml(figure.caption)}</strong><span class="source-figure-credit">${escapeHtml(figure.credit)}</span><a href="${escapeAttribute(source)}" target="_blank" rel="noopener noreferrer">出典：${escapeHtml(figure.sourceTitle)}<span aria-hidden="true"> ↗</span></a>${license ? `<a class="figure-license" href="${escapeAttribute(license)}" target="_blank" rel="noopener noreferrer">利用条件：${escapeHtml(figure.licenseTitle)}<span aria-hidden="true"> ↗</span></a>` : ''}</figcaption>
           <p class="figure-commentary"><strong>ここに注目：</strong>${escapeHtml(figure.commentary)}</p>
         </figure>`;
-  }).join('\n');
+  }).filter(Boolean).join('\n');
 }
 
 function hasSourceFigures(article, count) {
@@ -126,15 +131,16 @@ function hasSourceFigures(article, count) {
 function indexFigure(article) {
   const count = String(article?.body || '').trim().split(/\r?\n\s*\r?\n/).filter(Boolean).length;
   const figures = Array.isArray(article?.reading?.figures) ? article.reading.figures.slice(0, 2) : [];
-  return figures.find(figure => Number.isInteger(figure?.after) && figure.after >= 0 && figure.after < count &&
+  const position = figures.findIndex(figure => Number.isInteger(figure?.after) && figure.after >= 0 && figure.after < count &&
     ['alt', 'caption', 'sourceTitle', 'sourceUrl', 'credit', 'commentary'].every(key => typeof figure[key] === 'string' && figure[key].trim()) &&
-    renderSourceFigures({ ...article, reading: { ...article.reading, figures: [figure] } }, figure.after)) || null;
+    renderSourceFigures({ ...article, reading: { ...article.reading, figures: [figure] } }, figure.after));
+  return position < 0 ? null : { ...figures[position], anchor: sourceFigureAnchor(position) };
 }
 
 function indexVisual(article, baseUrl, figure) {
-  const href = escapeAttribute(articleUrl(article, baseUrl));
-  if (figure) return `<a class="card-visual" href="${href}" tabindex="-1" aria-hidden="true" title="${escapeAttribute(`${figure.caption} ${figure.credit}`)}"><img data-article-preview="figure" src="${escapeAttribute(figureImageUrl(figure.url))}" alt="${escapeAttribute(figure.alt)}" width="480" height="360" style="display:block;width:100%;height:auto;aspect-ratio:4/3;object-fit:contain" loading="lazy" decoding="async" referrerpolicy="no-referrer"></a>`;
-  return hasDiagram(article) ? `<a class="card-visual" href="${href}" tabindex="-1" aria-hidden="true">${renderArticleThumbnailSvg(article)}</a>` : '';
+  const href = articleUrl(article, baseUrl);
+  if (figure) return `<a class="card-visual" href="${escapeAttribute(`${href}#${figure.anchor}`)}" aria-label="${escapeAttribute(`${article.title}の図と出典を見る`)}" title="${escapeAttribute(`${figure.caption} ${figure.credit}`)}"><img data-article-preview="figure" src="${escapeAttribute(figureImageUrl(figure.url))}" alt="${escapeAttribute(figure.alt)}" width="480" height="360" style="display:block;width:100%;height:auto;aspect-ratio:4/3;object-fit:contain" loading="lazy" decoding="async" referrerpolicy="no-referrer"></a>`;
+  return hasDiagram(article) ? `<a class="card-visual" href="${escapeAttribute(href)}" tabindex="-1" aria-hidden="true">${renderArticleThumbnailSvg(article)}</a>` : '';
 }
 
 function metadata(article, { showTime = false } = {}) {
@@ -234,7 +240,7 @@ function speechPlayer(article, baseUrl) {
 function articleBody(article, paragraphs) {
   const sections = Array.isArray(article?.reading?.sections) ? article.reading.sections : [];
   const starts = new Map(sections.filter(section => Number.isInteger(section.start) && section.start >= 0 && section.start < paragraphs.length).map(section => [section.start, section.heading]));
-  return paragraphs.map((paragraph, index) => `${starts.has(index) ? `        <h2 class="story-heading" id="section-${index}" data-speech-chunk data-audio-cue="section-${index}">${escapeHtml(starts.get(index))}</h2>\n` : ''}        <p data-speech-chunk data-audio-cue="paragraph-${index}">${escapeHtml(paragraph)}</p>${renderSourceFigures(article, index)}`).join('\n');
+  return paragraphs.map((paragraph, index) => `${starts.has(index) ? `        <h2 class="story-heading" id="section-${index}" data-speech-chunk data-audio-cue="section-${index}">${escapeHtml(starts.get(index))}</h2>\n` : ''}        <p data-speech-chunk data-audio-cue="paragraph-${index}">${escapeHtml(paragraph)}</p>${renderSourceFigures(article, index, { anchors: true })}`).join('\n');
 }
 
 function document({ title, description, baseUrl, content, pageClass = '' }) {
