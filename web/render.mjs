@@ -10,7 +10,7 @@ const escapeHtml = (value) => String(value ?? '')
 
 const escapeAttribute = escapeHtml;
 // Change with the audio UI so newly rendered pages bypass older browser assets.
-const AUDIO_UI_REVISION = '20261107-figure-listening';
+const AUDIO_UI_REVISION = '20261125-reading-player';
 
 function absolute(path, baseUrl) {
   return new URL(path, baseUrl).href;
@@ -111,8 +111,7 @@ export function renderSourceFigures(article, after, { anchors = false } = {}) {
     if (!image || !source || !sources.has(source) || !['quote', 'licensed', 'original'].includes(usage)) return '';
     if (usage === 'licensed' && (!license || typeof figure.licenseTitle !== 'string' || !figure.licenseTitle.trim())) return '';
     const label = usage === 'licensed' ? '写真（利用条件に基づき掲載）' : usage === 'original' ? '公開データから作図' : '資料から引用';
-    // Keep the destination visible below the sticky audio controls on small screens.
-    const anchor = anchors ? ` id="${sourceFigureAnchor(position)}" tabindex="-1" style="scroll-margin-top: min(340px, 60vh)"` : '';
+    const anchor = anchors ? ` id="${sourceFigureAnchor(position)}" tabindex="-1"` : '';
     return `<figure class="source-figure"${anchor}>
           <span class="figure-label">${label}</span>
           <a class="source-image-link" href="${escapeAttribute(image)}" target="_blank" rel="noopener noreferrer"><img src="${escapeAttribute(image)}" alt="${escapeAttribute(figure.alt)}" style="max-width:100%;height:auto" loading="lazy" decoding="async" referrerpolicy="no-referrer"></a>
@@ -193,7 +192,7 @@ export function articleAudioHash(article) {
 }
 
 function speechPlayer(article, baseUrl) {
-  return `<section class="speech-player" data-speech-player data-audio-manifest="${escapeAttribute(absolute('audio/index.json', baseUrl))}" data-audio-fallback="${escapeAttribute(absolute('speech.js', baseUrl))}" data-article-id="${escapeAttribute(article.id)}" data-audio-content-hash="${articleAudioHash(article)}" hidden aria-labelledby="speech-title" aria-describedby="speech-help">
+  return `<section class="speech-player" data-speech-player data-audio-manifest="${escapeAttribute(absolute('audio/index.json', baseUrl))}" data-audio-fallback="${escapeAttribute(absolute(`speech.js?v=${AUDIO_UI_REVISION}`, baseUrl))}" data-article-id="${escapeAttribute(article.id)}" data-audio-content-hash="${articleAudioHash(article)}" hidden aria-labelledby="speech-title" aria-describedby="speech-help">
         <h2 id="speech-title" class="audio-visually-hidden">音声で聴く</h2>
         <p class="audio-current" data-audio-current data-audio-only hidden></p>
         <audio data-audio-element preload="metadata" hidden></audio>

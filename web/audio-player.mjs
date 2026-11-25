@@ -589,6 +589,7 @@ export async function initAudioPlayer(doc = globalThis.document, win = globalThi
   async function fallback(reason) {
     if (fallbackStarted) return;
     fallbackStarted = true; reader?.dispose(); listeningView?.dispose(); cleanups.forEach(remove => remove()); clearReading();
+    player.removeAttribute('data-audio-active');
     audio.removeAttribute('src'); audio.load();
     player.querySelectorAll('[data-audio-only]').forEach(node => { node.hidden = true; });
     if (fallbackButton) fallbackButton.hidden = true;
@@ -673,7 +674,8 @@ export async function initAudioPlayer(doc = globalThis.document, win = globalThi
     if (!node || doc.visibilityState === 'hidden') return;
     const rectangle = node.getBoundingClientRect(), toolbar = player.getBoundingClientRect();
     const height = win.innerHeight || doc.documentElement.clientHeight;
-    const top = toolbar.top <= 24 || rectangle.top >= toolbar.bottom ? Math.min(toolbar.height + 24, height - 80) : 24;
+    const toolbarCoversText = player.hasAttribute('data-audio-active') && (toolbar.top <= 24 || rectangle.top >= toolbar.bottom);
+    const top = toolbarCoversText ? Math.min(toolbar.height + 24, height - 80) : 24;
     const available = Math.max(80, height - top - 24);
     if (rectangle.top >= top && (rectangle.height > available ? rectangle.top < height - 24 : rectangle.bottom <= height - 24)) return;
     const offset = rectangle.top - top - Math.max(0, (available - rectangle.height) / 2);
@@ -704,6 +706,7 @@ export async function initAudioPlayer(doc = globalThis.document, win = globalThi
   const session = win.navigator?.mediaSession;
   function update(state) {
     const article = day.articles[state.index];
+    player.toggleAttribute('data-audio-active', ['loading', 'playing', 'paused'].includes(state.phase));
     syncReading(state);
     toggle.disabled = false;
     toggle.textContent = state.phase === 'playing' || state.phase === 'loading' ? '一時停止' : state.phase === 'paused' ? '再開' : state.phase === 'finished' ? 'もう一度聴く' : state.phase === 'error' ? 'もう一度試す' : '再生';

@@ -163,12 +163,15 @@ test('related article titles cannot inject HTML, attributes or CDATA',()=>{
  }
 });
 
-test('absent related metadata preserves pre-feature article HTML, RSS and audio hashes',()=>{
+test('absent related metadata preserves article markup apart from asset revisions, RSS and audio hashes',()=>{
  const edition=syntheticDay('2026-10-21');
  const fixtureContext={title:'検証用の朝の3本',baseUrl:context.baseUrl,articles:edition.articles};
  const hash=value=>createHash('sha256').update(value).digest('hex');
- // Captured from the renderer before related-article support, using only this synthetic edition.
- assert.equal(hash(renderArticle({...fixtureContext,article:edition.articles[0]})),'e2fd35c2fb5ce13bf74c0caa1943080e0cd21f3dea4a60c19530d96cf4ba4c45');
+ // Compare with the renderer before related-article support after normalizing cache-busting queries.
+ const articleHtml=renderArticle({...fixtureContext,article:edition.articles[0]})
+  .replace(/((?:style\.css|audio-player\.js)\?v=)[a-z0-9-]+(?=")/g,(_,asset)=>`${asset}20261107-figure-listening`)
+  .replace(/(speech\.js)\?v=[a-z0-9-]+(?=")/g,'$1');
+ assert.equal(hash(articleHtml),'e2fd35c2fb5ce13bf74c0caa1943080e0cd21f3dea4a60c19530d96cf4ba4c45');
  assert.equal(hash(renderFeed(fixtureContext)),'8d56fa75d1bf80ae8c88dea09a670e8be3e91b1dbf1ea8ea355e8a312b4e640e');
  assert.equal(articleAudioHash(edition.articles[0]),'33cb96e0039e5056b26733881063fd804a266eb00308cba57968147b3f4dcee0');
 });

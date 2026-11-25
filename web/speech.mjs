@@ -102,6 +102,7 @@ export function initSpeechPlayer(doc = globalThis.document, win = globalThis.win
   }
   let lastStatus = '';
   function update(state) {
+    player.toggleAttribute('data-audio-active', state.phase === 'playing' || state.phase === 'paused');
     toggle.disabled = false;
     toggle.textContent = state.phase === 'playing' ? '一時停止' : state.phase === 'paused' ? '再開' : state.phase === 'finished' ? 'もう一度聴く' : state.phase === 'error' ? 'もう一度試す' : '読み上げる';
     stop.disabled = state.phase === 'idle'; speed.value = String(state.rate);
