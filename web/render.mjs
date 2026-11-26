@@ -274,7 +274,7 @@ ${content}
     <p>AIが作成した記事です。重要な情報は参照元もご確認ください。</p>
     <div class="footer-links"><a href="${escapeAttribute(homeUrl)}">記事一覧</a><span aria-hidden="true">·</span><a href="${escapeAttribute(feedUrl)}">RSS</a></div>
   </footer>
-  ${pageClass === 'article-page' ? `<script type="module" src="${escapeAttribute(absolute(`audio-player.js?v=${AUDIO_UI_REVISION}`, baseUrl))}"></script>` : ''}${indexPage ? `<script type="module" src="${escapeAttribute(absolute('index-search.js?v=history', baseUrl))}"></script>` : ''}
+  ${pageClass === 'article-page' ? `<script type="module" src="${escapeAttribute(absolute(`audio-player.js?v=${AUDIO_UI_REVISION}`, baseUrl))}"></script>` : ''}${indexPage ? `<script type="module" src="${escapeAttribute(absolute('index-search.js?v=terms', baseUrl))}"></script>` : ''}
 </body>
 </html>
 `;
@@ -294,7 +294,7 @@ export function renderIndex({ title = 'あなたの朝の3本', baseUrl, article
       ${entries.length ? `<form class="index-search" data-index-search role="search" hidden>
         <label for="article-search">タイトル・本文から記事を探す</label>
         <div class="index-search-controls">
-          <input id="article-search" type="search" placeholder="Suica など" maxlength="120" autocomplete="off" enterkeyhint="search">
+          <input id="article-search" type="search" placeholder="ATOS 発車標 など" maxlength="120" autocomplete="off" enterkeyhint="search">
           <button type="button" data-index-search-clear>クリア</button>
         </div>
       </form>

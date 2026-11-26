@@ -45,10 +45,12 @@ if (form) {
       } catch { /* Filtering remains usable when the browser cannot save history state. */ }
     }
     const query = normalize(value);
+    const terms = query ? query.split(/\s+/) : [];
     if (query && bodyState === 'idle') void loadBodies();
     let matches = 0;
     for (const { card, id, text } of cards) {
-      card.hidden = !text.includes(query) && !bodiesById?.get(id)?.includes(query);
+      const body = bodiesById?.get(id) ?? '';
+      card.hidden = !terms.every(term => text.includes(term) || body.includes(term));
       if (!card.hidden) matches += 1;
     }
     const loading = Boolean(query) && bodyState === 'loading';
