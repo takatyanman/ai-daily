@@ -289,9 +289,11 @@ test('a cited figure stays with its body context in HTML and RSS without replaci
  assert.equal((html.match(/class="source-figure"/g)||[]).length,1);
  assert.ok(html.includes('資料から引用')&&html.includes(a.reading.figures[0].commentary));
  assert.ok(html.includes('referrerpolicy="no-referrer"'));
+ assert.ok(html.includes('<span class="source-image-zoom-label">拡大して見る</span>'));
  assert.ok(rss.indexOf('-thumb.png')<rss.indexOf('release_image/17557/example.png'));
  assert.ok(rss.includes(figureSource.url)&&rss.includes(a.reading.figures[0].credit));
  assert.ok(!rss.includes('id="source-figure-'));
+ assert.ok(!rss.includes('source-image-zoom-label'));
  assert.equal((rss.match(/<media:thumbnail /g)||[]).length,3);
  for(const text of p)assert.equal(html.split(text).length-1,1);
 });

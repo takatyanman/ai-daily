@@ -10,7 +10,7 @@ const escapeHtml = (value) => String(value ?? '')
 
 const escapeAttribute = escapeHtml;
 // Change with the audio UI so newly rendered pages bypass older browser assets.
-const AUDIO_UI_REVISION = '20261125-reading-player';
+const AUDIO_UI_REVISION = '20261127-figure-viewer';
 
 function absolute(path, baseUrl) {
   return new URL(path, baseUrl).href;
@@ -114,7 +114,7 @@ export function renderSourceFigures(article, after, { anchors = false } = {}) {
     const anchor = anchors ? ` id="${sourceFigureAnchor(position)}" tabindex="-1"` : '';
     return `<figure class="source-figure"${anchor}>
           <span class="figure-label">${label}</span>
-          <a class="source-image-link" href="${escapeAttribute(image)}" target="_blank" rel="noopener noreferrer"><img src="${escapeAttribute(image)}" alt="${escapeAttribute(figure.alt)}" style="max-width:100%;height:auto" loading="lazy" decoding="async" referrerpolicy="no-referrer"></a>
+          <a class="source-image-link" href="${escapeAttribute(image)}" target="_blank" rel="noopener noreferrer"><img src="${escapeAttribute(image)}" alt="${escapeAttribute(figure.alt)}" style="max-width:100%;height:auto" loading="lazy" decoding="async" referrerpolicy="no-referrer">${anchors ? '<span class="source-image-zoom-label">拡大して見る</span>' : ''}</a>
           <figcaption><strong>${escapeHtml(figure.caption)}</strong><span class="source-figure-credit">${escapeHtml(figure.credit)}</span><a href="${escapeAttribute(source)}" target="_blank" rel="noopener noreferrer">出典：${escapeHtml(figure.sourceTitle)}<span aria-hidden="true"> ↗</span></a>${license ? `<a class="figure-license" href="${escapeAttribute(license)}" target="_blank" rel="noopener noreferrer">利用条件：${escapeHtml(figure.licenseTitle)}<span aria-hidden="true"> ↗</span></a>` : ''}</figcaption>
           <p class="figure-commentary"><strong>ここに注目：</strong>${escapeHtml(figure.commentary)}</p>
         </figure>`;

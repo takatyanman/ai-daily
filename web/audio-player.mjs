@@ -127,6 +127,81 @@ function cleanListeningClone(node) {
   return clone;
 }
 
+function watchFigureImages(container) {
+  container.querySelectorAll('img').forEach(image => {
+    image.loading = 'eager';
+    const failed = () => {
+      if (!image.isConnected || image.hidden) return;
+      image.hidden = true;
+      const note = image.ownerDocument.createElement('p');
+      note.className = 'audio-listening-empty';
+      note.textContent = '図を読み込めません。図の説明・出典から内容を確認できます。';
+      image.parentNode.append(note);
+    };
+    image.addEventListener('error', failed, {once: true});
+    if (image.complete && image.naturalWidth === 0) failed();
+  });
+}
+
+function createFigureZoom(doc) {
+  const dialog = doc.createElement('dialog');
+  dialog.className = 'audio-listening-zoom';
+  dialog.setAttribute('aria-label', '図の拡大と出典');
+  dialog.innerHTML = `<div class="audio-listening-zoom-toolbar">
+    <h2 class="audio-listening-zoom-title"></h2>
+    <button type="button" class="audio-listening-zoom-close" autofocus>閉じる</button>
+  </div><div class="audio-listening-zoom-content" tabindex="0"></div>`;
+  const heading = dialog.querySelector('h2');
+  const closeButton = dialog.querySelector('button');
+  const content = dialog.querySelector('.audio-listening-zoom-content');
+  let trigger = null;
+  function restoreFocus() {
+    if (dialog.hasAttribute('open')) return;
+    const previous = trigger;
+    trigger = null;
+    content.replaceChildren();
+    if (doc.visibilityState !== 'hidden' && previous?.isConnected && previous.getClientRects().length) {
+      previous.focus({preventScroll: true});
+    }
+  }
+  function close() {
+    if (!dialog.hasAttribute('open')) return;
+    if (typeof dialog.close === 'function') dialog.close();
+    else { dialog.removeAttribute('open'); restoreFocus(); }
+  }
+  closeButton.addEventListener('click', close);
+  dialog.addEventListener('click', event => { if (event.target === dialog) close(); });
+  dialog.addEventListener('close', restoreFocus);
+  doc.body.append(dialog);
+  return {
+    dialog,
+    get isOpen() { return dialog.hasAttribute('open'); },
+    show(figure, title, opener) {
+      if (dialog.hasAttribute('open')) return false;
+      heading.textContent = title;
+      content.replaceChildren(cleanListeningClone(figure));
+      watchFigureImages(content);
+      trigger = opener;
+      try {
+        if (typeof dialog.showModal === 'function') dialog.showModal();
+        else dialog.setAttribute('open', '');
+      } catch {
+        restoreFocus();
+        return false;
+      }
+      content.scrollTop = 0;
+      content.scrollLeft = 0;
+      closeButton.focus({preventScroll: true});
+      return true;
+    },
+    closeFrom(opener) {
+      if (trigger !== opener || !dialog.hasAttribute('open')) return false;
+      close();
+      return true;
+    },
+  };
+}
+
 /** Figure markup comes only from the already parsed, version-matched article snapshots. */
 function articleListeningFigures(content) {
   const sources = [...content.querySelectorAll('.source-figure')].filter(figure => figure.querySelector('img[src]')).slice(0, 2);
@@ -139,7 +214,7 @@ function articleListeningFigures(content) {
 }
 
 /** This view never moves, replaces, starts, pauses, or seeks the native media element. */
-function createListeningView({doc, win, player, listen, onFollow, onLocate}) {
+function createListeningView({doc, win, player, listen, figureZoom, onFollow, onLocate}) {
   const make = (tag, className, text) => {
     const node = doc.createElement(tag); node.className = className;
     if (text) node.textContent = text;
@@ -187,12 +262,6 @@ function createListeningView({doc, win, player, listen, onFollow, onLocate}) {
   const existingFollowControls = player.querySelector('.audio-follow-controls');
   if (existingFollowControls) existingFollowControls.append(open); else player.append(open);
   player.classList.add('audio-listening-player');
-  const zoom = make('dialog', 'audio-listening-zoom'); zoom.setAttribute('aria-label', '図の拡大と出典');
-  const zoomToolbar = make('div', 'audio-listening-zoom-toolbar');
-  const zoomTitle = make('h2', 'audio-listening-zoom-title', '図の拡大');
-  const zoomClose = button('閉じる', 'audio-listening-zoom-close', () => closeZoom());
-  const zoomContent = make('div', 'audio-listening-zoom-content'); zoomContent.tabIndex = 0;
-  zoomToolbar.append(zoomTitle, zoomClose); zoom.append(zoomToolbar, zoomContent); doc.body.append(zoom);
   let mode = {active: false, dismissed: false}, phase = 'idle', articleId = null, figures = [], selection = 'auto', figureIndex = -2;
   let cueNodes = new Map(), currentCue = null, savedFocus = null, savedScroll = null, inertNodes = [], inertSeen = new Set();
   let lastCueKey = null, lastView = null, lastFollow = true, disposed = false;
@@ -210,7 +279,7 @@ function createListeningView({doc, win, player, listen, onFollow, onLocate}) {
   function focus(node) { if (doc.visibilityState !== 'hidden') try { node?.focus({preventScroll: true}); } catch { node?.focus(); } }
   function restrictBackground() {
     const visit = node => {
-      if (node === panel || node === player || node === zoom) return;
+      if (node === panel || node === player || node === figureZoom.dialog) return;
       if (node.contains(player)) { [...node.children].forEach(visit); return; }
       if (inertSeen.has(node)) return;
       inertSeen.add(node);
@@ -227,7 +296,7 @@ function createListeningView({doc, win, player, listen, onFollow, onLocate}) {
       savedFocus = doc.activeElement; savedScroll = [win.scrollX || 0, win.scrollY || 0];
       restrictBackground(); viewport(); focus(close); scrollReading();
     } else {
-      closeZoom();
+      figureZoom.closeFrom(expandButton);
       inertNodes.forEach(([node, wasInert]) => { if (!wasInert) node.removeAttribute('inert'); }); inertNodes = []; inertSeen = new Set();
       const target = savedFocus?.isConnected && savedFocus !== doc.body ? savedFocus : open;
       focus(target);
@@ -236,33 +305,10 @@ function createListeningView({doc, win, player, listen, onFollow, onLocate}) {
     }
   }
   function setMode(action) { applyMode(audioListeningState(mode, phase, action)); }
-  function closeZoom() {
-    if (!zoom.open) return;
-    if (typeof zoom.close === 'function') zoom.close(); else { zoom.removeAttribute('open'); zoom.hidden = true; }
-  }
-  function watchImages(container) {
-    container.querySelectorAll('img').forEach(image => {
-      image.loading = 'eager';
-      const failed = () => {
-        if (!image.isConnected || image.hidden) return;
-        image.hidden = true;
-        const note = make('p', 'audio-listening-empty', '図を読み込めません。図の説明・出典から内容を確認できます。');
-        image.parentNode.append(note);
-      };
-      image.addEventListener('error', failed, {once: true});
-      if (image.complete && image.naturalWidth === 0) failed();
-    });
-  }
   function openZoom() {
     if (figureIndex < 0) return;
-    zoomContent.replaceChildren(cleanListeningClone(figures[figureIndex].node));
-    zoomTitle.textContent = `${lastView?.title || ''}：図${figureIndex + 1}`;
-    watchImages(zoomContent);
-    if (typeof zoom.showModal === 'function') zoom.showModal(); else { zoom.hidden = false; zoom.setAttribute('open', ''); }
-    focus(zoomClose);
+    figureZoom.show(figures[figureIndex].node, `${lastView?.title || ''}：図${figureIndex + 1}`, expandButton);
   }
-  listen(zoom, 'click', event => { if (event.target === zoom) closeZoom(); });
-  listen(zoom, 'close', () => { if (mode.active) focus(figureDetails.open ? expandButton : figureIndex >= 0 ? zoomButton : close); });
   function showFigure(cueKey) {
     const index = audioFigureIndex(figures, cueKey, selection);
     choices.querySelectorAll('button').forEach(node => node.setAttribute('aria-pressed', String(node.dataset.selection === String(selection))));
@@ -279,12 +325,12 @@ function createListeningView({doc, win, player, listen, onFollow, onLocate}) {
     const figure = cleanListeningClone(figures[index].node), image = figure.querySelector('img');
     stage.append(image);
     figure.querySelectorAll('figcaption, .figure-commentary, .figure-note, .visual-legend').forEach(node => description.append(node));
-    watchImages(stage);
-    if (zoom.open) { closeZoom(); focus(zoomButton); }
+    watchFigureImages(stage);
+    if (figureZoom.closeFrom(expandButton)) focus(zoomButton);
   }
   function showArticle(view) {
     articleId = view.id; lastView = view; figures = view.figures; selection = 'auto'; figureIndex = -2; lastCueKey = null;
-    closeZoom(); figureDetails.open = false; title.textContent = view.title; panel.dataset.articleId = view.id;
+    figureZoom.closeFrom(expandButton); figureDetails.open = false; title.textContent = view.title; panel.dataset.articleId = view.id;
     if (mode.active) restrictBackground();
     choices.replaceChildren();
     zoomButton.hidden = !figures.length;
@@ -309,7 +355,7 @@ function createListeningView({doc, win, player, listen, onFollow, onLocate}) {
     reading.scrollTo?.({top: Math.max(0, reading.scrollTop + cue.top - box.top - 12), behavior: force || win.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth'});
   }
   listen(doc, 'keydown', event => {
-    if (!mode.active || zoom.open) return;
+    if (!mode.active || figureZoom.isOpen) return;
     if (event.key === 'Escape') { event.preventDefault(); setMode('close'); return; }
     if (event.key !== 'Tab') return;
     const selector = 'button:not(:disabled), input:not(:disabled), select:not(:disabled), a[href], summary, [tabindex="0"]';
@@ -337,7 +383,7 @@ function createListeningView({doc, win, player, listen, onFollow, onLocate}) {
     refresh() { viewport(); scrollReading(); },
     dispose() {
       applyMode({active: false, dismissed: false}); disposed = true; observer?.disconnect();
-      panel.remove(); zoom.remove(); open.remove(); player.classList.remove('audio-listening-player');
+      panel.remove(); open.remove(); player.classList.remove('audio-listening-player');
       for (const name of ['--audio-viewport-height', '--audio-viewport-offset-top', '--audio-listening-player-height']) doc.body.style.removeProperty(name);
     },
   };
@@ -569,6 +615,15 @@ export async function initAudioPlayer(doc = globalThis.document, win = globalThi
   const player = doc?.querySelector('[data-speech-player]');
   if (!player || player.dataset.audioReady) return null;
   player.dataset.audioReady = 'true'; player.hidden = false;
+  const figureZoom = createFigureZoom(doc);
+  doc.querySelector('[data-audio-article-root]')?.addEventListener('click', event => {
+    if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    const link = event.target?.closest?.('[data-audio-article-content] .source-image-link');
+    if (link && typeof figureZoom.dialog.showModal === 'function') {
+      const figure = link.closest('.source-figure');
+      if (figure && figureZoom.show(figure, '図の拡大', link)) event.preventDefault();
+    }
+  });
   const find = selector => player.querySelector(selector);
   const toggle = find('[data-speech-toggle]'), stop = find('[data-speech-stop]');
   const speed = find('[data-speech-rate]'), progress = find('[data-speech-progress]');
@@ -669,9 +724,9 @@ export async function initAudioPlayer(doc = globalThis.document, win = globalThi
     try { win.localStorage.setItem('ai-daily-audio-follow', value ? 'on' : 'off'); } catch { /* Optional preference. */ }
     if (reader) syncReading(reader.state(), value);
   }
-  listeningView = createListeningView({doc, win, player, listen, onFollow: setFollow, onLocate: () => syncReading(reader.state(), true)});
+  listeningView = createListeningView({doc, win, player, listen, figureZoom, onFollow: setFollow, onLocate: () => syncReading(reader.state(), true)});
   function scrollToReading(node) {
-    if (!node || doc.visibilityState === 'hidden') return;
+    if (!node || figureZoom.isOpen || doc.visibilityState === 'hidden') return;
     const rectangle = node.getBoundingClientRect(), toolbar = player.getBoundingClientRect();
     const height = win.innerHeight || doc.documentElement.clientHeight;
     const toolbarCoversText = player.hasAttribute('data-audio-active') && (toolbar.top <= 24 || rectangle.top >= toolbar.bottom);

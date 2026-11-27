@@ -204,6 +204,8 @@ a:focus-visible { outline: 3px solid #668b54; outline-offset: 5px; border-radius
 .source-figure .figure-label { display: inline-block; margin-bottom: 12px; }
 .source-image-link { display: block; }
 .source-image-link img { display: block; max-width: 100%; width: auto; height: auto; max-height: 520px; margin: 0 auto; object-fit: contain; border-radius: 6px; }
+.source-image-zoom-label { display: block; margin-top: 4px; color: var(--green); font-size: 12px; text-align: right; }
+.audio-listening-zoom .source-image-zoom-label { display: none; }
 .source-figure figcaption { display: flex; flex-direction: column; gap: 5px; margin-top: 13px; font-size: 12px; line-height: 1.8; overflow-wrap: anywhere; }
 .source-figure-credit { color: var(--muted); font-size: 11px; }
 .diagram-link { margin: 0 0 16px; color: var(--muted); font-size: 11px; line-height: 1.8; }
@@ -411,6 +413,7 @@ body.is-audio-listening .speech-player > .audio-fallback, body.is-audio-listenin
 .audio-listening-zoom-content { min-width: 0; min-height: 0; overflow: auto; padding: 12px; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
 .audio-listening-zoom-content:focus-visible { outline: 3px solid #668b54; outline-offset: -3px; }
 .audio-listening-zoom-content :is(.source-figure, .story-visual) { margin: 0; padding: 0; overflow: visible; border: 0; border-radius: 0; background: transparent; }
+.audio-listening-zoom-content .source-image-link { overflow-x: auto; overscroll-behavior-x: contain; }
 .audio-listening-zoom-content img { display: block; width: max(760px, 100%); max-width: none; height: auto; max-height: none; margin: 0; border-radius: 0; object-fit: contain; }
 .audio-listening-zoom-content :is(figcaption, .figure-commentary, .figure-note, .visual-legend) { max-width: 760px; font-size: 13px; line-height: 1.9; }
 .audio-listening-zoom-content a { min-height: 44px; }
