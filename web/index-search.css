@@ -35,5 +35,7 @@
 .index-search button:focus-visible { outline: 3px solid #668b54; outline-offset: 2px; }
 .index-search input::-webkit-search-cancel-button { display: none; }
 
+.index-search-recovery { margin: 12px 0; color: var(--muted); }
+.index-search-recovery p { margin: 0 0 6px; }
 .index-search-empty { padding: 20px 0; color: var(--muted); }
 .article-list > .article-card[hidden] { display: none; }

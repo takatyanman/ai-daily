@@ -11,6 +11,7 @@ const escapeHtml = (value) => String(value ?? '')
 const escapeAttribute = escapeHtml;
 // Change with the audio UI so newly rendered pages bypass older browser assets.
 const AUDIO_UI_REVISION = '20261127-figure-viewer';
+const INDEX_SEARCH_REVISION = 'body-retry';
 
 function absolute(path, baseUrl) {
   return new URL(path, baseUrl).href;
@@ -256,7 +257,7 @@ function document({ title, description, baseUrl, content, pageClass = '' }) {
   <meta name="description" content="${escapeAttribute(description)}">
   <meta name="theme-color" content="#254b3e">
   <title>${escapeHtml(title)}</title>
-  <link rel="stylesheet" href="${escapeAttribute(stylesheetUrl)}">${indexPage ? `\n  <link rel="stylesheet" href="${escapeAttribute(absolute('index-search.css', baseUrl))}">` : ''}
+  <link rel="stylesheet" href="${escapeAttribute(stylesheetUrl)}">${indexPage ? `\n  <link rel="stylesheet" href="${escapeAttribute(absolute(`index-search.css?v=${INDEX_SEARCH_REVISION}`, baseUrl))}">` : ''}
   <link rel="alternate" type="application/rss+xml" title="あなたの朝の3本 RSS" href="${escapeAttribute(feedUrl)}">
 </head>
 <body class="${escapeAttribute(pageClass)}">
@@ -274,7 +275,7 @@ ${content}
     <p>AIが作成した記事です。重要な情報は参照元もご確認ください。</p>
     <div class="footer-links"><a href="${escapeAttribute(homeUrl)}">記事一覧</a><span aria-hidden="true">·</span><a href="${escapeAttribute(feedUrl)}">RSS</a></div>
   </footer>
-  ${pageClass === 'article-page' ? `<script type="module" src="${escapeAttribute(absolute(`audio-player.js?v=${AUDIO_UI_REVISION}`, baseUrl))}"></script>` : ''}${indexPage ? `<script type="module" src="${escapeAttribute(absolute('index-search.js?v=terms', baseUrl))}"></script>` : ''}
+  ${pageClass === 'article-page' ? `<script type="module" src="${escapeAttribute(absolute(`audio-player.js?v=${AUDIO_UI_REVISION}`, baseUrl))}"></script>` : ''}${indexPage ? `<script type="module" src="${escapeAttribute(absolute(`index-search.js?v=${INDEX_SEARCH_REVISION}`, baseUrl))}"></script>` : ''}
 </body>
 </html>
 `;
@@ -290,15 +291,18 @@ export function renderIndex({ title = 'あなたの朝の3本', baseUrl, article
       <p class="intro-description">何が変わったか、なぜ重要か。公開情報から、仕事への接点も整理します。</p>
     </section>
     <section class="article-list-section" aria-labelledby="articles-title">
-      <div class="section-heading"><h2 id="articles-title">届いた記事</h2><span role="status" data-index-search-count>${entries.length}件</span></div>
+      <div class="section-heading"><h2 id="articles-title">届いた記事</h2><span role="status" data-index-search-count tabindex="-1">${entries.length}件</span></div>
       ${entries.length ? `<form class="index-search" data-index-search role="search" hidden>
         <label for="article-search">タイトル・本文から記事を探す</label>
         <div class="index-search-controls">
           <input id="article-search" type="search" placeholder="ATOS 発車標 など" maxlength="120" autocomplete="off" enterkeyhint="search">
           <button type="button" data-index-search-clear>クリア</button>
         </div>
+        <div class="index-search-recovery" data-index-search-unavailable hidden>
+          <p role="status">本文を取得できませんでした。タイトルや要約の結果を表示中です。</p>
+          <button type="button" data-index-search-retry hidden>本文検索を再試行</button>
+        </div>
       </form>
-      <p class="index-search-empty" data-index-search-unavailable role="status" hidden>本文を取得できませんでした。タイトルや要約の検索結果を表示しています。</p>
       <p class="index-search-empty" data-index-search-empty hidden>該当する記事がありません。</p>
       <ol class="article-list">
 ${entries.map((article, index) => {

@@ -6,6 +6,7 @@ if (form) {
   const savedQuery = history.state?.articleSearchQuery;
   if (typeof savedQuery === 'string') input.value = savedQuery;
   const clear = form.querySelector('[data-index-search-clear]');
+  const retry = form.querySelector('[data-index-search-retry]');
   const count = document.querySelector('[data-index-search-count]');
   const empty = document.querySelector('[data-index-search-empty]');
   const unavailable = document.querySelector('[data-index-search-unavailable]');
@@ -78,6 +79,16 @@ if (form) {
     input.focus();
     filterArticles();
   });
+  if (retry) {
+    retry.hidden = false;
+    retry.addEventListener('click', () => {
+      if (bodyState !== 'unavailable' || composing) return;
+      // The retry button is hidden while loading. Keep focus in the search section.
+      if (document.activeElement === retry) count.focus({ preventScroll: true });
+      void loadBodies();
+      filterArticles();
+    });
+  }
   filterArticles();
   form.hidden = false;
 }

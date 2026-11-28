@@ -220,7 +220,10 @@ test('index search starts hidden and uses escaped public metadata without adding
  assert.ok(index.includes('data-index-search role="search" hidden'));
  assert.ok(index.includes(`data-index-search-id="${article.id}"`));
  assert.ok(index.includes(`data-index-search-text="${article.title}\n${article.category}\n要約だけの語 &amp; &quot;水力&quot;\n導入だけの語 &lt;案内&gt;"`));
- assert.ok(index.includes(`src="${context.baseUrl}index-search.js?v=terms"`));
+ assert.ok(index.includes('data-index-search-unavailable hidden'));
+ assert.ok(index.includes('<button type="button" data-index-search-retry hidden>本文検索を再試行</button>'));
+ assert.ok(index.includes(`src="${context.baseUrl}index-search.js?v=body-retry"`));
+ assert.ok(index.includes(`href="${context.baseUrl}index-search.css?v=body-retry"`));
  assert.ok(!index.includes(article.body.split('\n\n')[0]));
  assert.ok(!body.includes('index-search.js')&&!body.includes('data-index-search-text'));
 });
